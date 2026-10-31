@@ -1,0 +1,172 @@
+/* Two inks on paper, as in a rubricated book: black for the text, red for
+   the apparatus (sigla, actions, the active passage). Every color is a
+   light-dark() pair: light "Folio" on archival paper, dark "Lamp". */
+:root {
+	color-scheme: light dark;
+
+	--page: light-dark(#f2f3ef, #14161b);
+	--raised: light-dark(#fafaf8, #1b1e24);
+	--sunken: light-dark(#e6e7e2, #0f1115);
+	--ink: light-dark(#1f1f1d, #e6e4de);
+	--ink-2: light-dark(#5f5e59, #9d9b94);
+	--line: light-dark(#d3d4ce, #2c3039);
+	--edge: light-dark(#8f908a, #5d626d);
+	--rubric: light-dark(#a3161f, #ec7f74);
+	--accent: var(--rubric);
+	--on-accent: light-dark(#fafaf8, #14161b);
+	--danger: var(--rubric);
+	/* The quoted words in a passage, marked as if in red pencil. */
+	--highlight: color-mix(in srgb, var(--rubric) 13%, transparent);
+	/* Dims the page behind sheets and dialogs. Lamp ink is near-white, so the
+	   scrim can't be derived from it. */
+	--scrim: light-dark(rgb(31 31 29 / 0.3), rgb(0 0 0 / 0.55));
+
+	--serif: 'Literata Variable', Charter, Georgia, serif;
+	--mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+	/* Type scale (px): 14 / 16 / 18 / 20 / 24 / 32, and 44 for a notebook's title */
+	--t-xs: 0.875rem;
+	--t-s: 1rem;
+	--t-m: 1.125rem;
+	--t-l: 1.25rem;
+	--t-xl: 1.5rem;
+	--t-xxl: 2rem;
+	--t-display: 2.75rem;
+	/* Literata's ascent (1.18em) is far taller than its descent (0.31em), so
+	   capitals centered in a box sit 1/16em low. Boxed buttons and fields
+	   take it off their top padding and add it to the bottom. */
+	--cap-lift: 0.0625em;
+
+	/* The text column, and the margin beside it where quotes are set. */
+	--measure: 34rem;
+	--margin: 15rem;
+	--margin-gap: 2.5rem;
+	--ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+	/* Width of a scrollbar where a mouse or trackpad is the pointer. */
+	--scrollbar: 12px;
+}
+
+:root[data-theme='light'] {
+	color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+	color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	height: 100%;
+}
+
+body {
+	background: var(--page);
+	color: var(--ink);
+	font-family: var(--serif);
+	font-size: var(--t-s);
+	line-height: 1.5;
+	-webkit-font-smoothing: antialiased;
+	text-rendering: optimizeLegibility;
+}
+
+a {
+	color: var(--accent);
+	text-underline-offset: 0.2em;
+}
+
+button,
+input,
+textarea,
+select {
+	font: inherit;
+	color: inherit;
+}
+
+:focus-visible {
+	outline: 2px solid var(--accent);
+	outline-offset: 2px;
+}
+
+/* Small square checkboxes, filled with rubric when on. */
+input.check {
+	display: grid;
+	flex: none;
+	place-items: center;
+	width: 0.9rem;
+	height: 0.9rem;
+	margin: 0;
+	border-radius: 2px;
+	box-shadow: inset 0 0 0 1px var(--edge);
+	appearance: none;
+	cursor: pointer;
+}
+
+input.check:checked {
+	background: var(--rubric);
+	box-shadow: none;
+}
+
+input.check:checked::after {
+	content: '';
+	width: 0.25rem;
+	height: 0.5rem;
+	margin-top: -0.12rem;
+	border: solid var(--on-accent);
+	border-width: 0 1.5px 1.5px 0;
+	transform: rotate(45deg);
+}
+
+/* Thin scrollbars in the page's inks. Touch screens keep their own overlay
+   bars. Chromium and WebKit ignore ::-webkit-scrollbar styles on an element
+   with scrollbar-color set, so only browsers without them get that. A
+   scroller recolors its thumb through --scrollbar-thumb. */
+@media (pointer: fine) {
+	::-webkit-scrollbar {
+		width: var(--scrollbar);
+		height: var(--scrollbar);
+	}
+	::-webkit-scrollbar-track,
+	::-webkit-scrollbar-corner {
+		background: transparent;
+	}
+	::-webkit-scrollbar-thumb {
+		border: 3px solid transparent;
+		border-radius: var(--scrollbar);
+		background: var(--scrollbar-thumb, var(--edge)) padding-box;
+	}
+	::-webkit-scrollbar-thumb:hover {
+		background-color: var(--ink-2);
+	}
+	@supports not selector(::-webkit-scrollbar) {
+		* {
+			scrollbar-width: thin;
+			scrollbar-color: var(--scrollbar-thumb, var(--edge)) transparent;
+		}
+	}
+}
+
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+	}
+}

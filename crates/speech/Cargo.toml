@@ -1,0 +1,19 @@
+[package]
+name = "bowerbird-speech"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+loqui-g2p = "0.4"
+loqui-kokoro = "0.4"
+loqui-whisper = "0.4"
+opus-pure = "0.2.2"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
+rubato = "5.0.1"
+symphonia = { version = "0.6.1", default-features = false, features = ["aac", "flac", "isomp4", "mkv", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+thiserror = "2"
+tokio = { version = "1.54", features = ["fs", "io-util"] }
+
+[dev-dependencies]
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros"] }

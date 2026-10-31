@@ -1,0 +1,207 @@
+# Bowerbird
+
+A research notebook for your own sources. Add PDFs, books, web pages,
+YouTube videos and recordings, ask questions, and get answers where every
+quote is checked against the source it cites. Notebooks are plain folders on
+your disk, search and OCR run on your machine, and answers come from any
+model you choose.
+
+![An answer about the Peace of Westphalia, with cited quotes in the margin](docs/screenshots/answer.png)
+
+## Every quote is checked
+
+Each citation in an answer carries the words it quotes. Bowerbird looks those
+words up in the passage the citation points to. A quote that isn't there is
+marked unverified, and the footer counts how many were found. Click a
+citation to open the passage with the quoted words highlighted, or, for a
+PDF, the printed page.
+
+![The cited passage opened beside the answer, quoted words highlighted](docs/screenshots/passage.png)
+
+## What it does
+
+- **Sources:** PDF, Word (.docx), EPUB, Markdown, plain text, web pages,
+  YouTube captions, and audio recordings, which are transcribed on your
+  machine with Whisper. Scanned PDFs are read with OCR on your machine
+  (PP-OCRv5, Latin script including accented letters; Cyrillic and other
+  scripts aren't read yet). Pictures in web pages, Word documents and EPUBs
+  are kept beside their captions.
+- **Search by keyword and by meaning:** passages are found with SQLite FTS5
+  (BM25) and with EmbeddingGemma vectors, fused by weighted reciprocal rank,
+  so a question worded differently from the source still finds it.
+  Questions can be asked in a different language from the sources.
+- **Notes:** save answers to notes, edit them, and add a note back as a
+  source.
+- **Reports:** a study guide, briefing, timeline, FAQ, or a report you
+  describe, written into a note with citations.
+- **Study material:** flashcards (with Anki export), quizzes, mind maps (SVG),
+  data tables (CSV), slide decks (PPTX), infographics (SVG, PNG), and audio
+  overviews in four formats, voiced on your machine with Kokoro.
+- **Finding sources:** search the web through DuckDuckGo, SearXNG, Brave,
+  Tavily or Exa, and add what you pick.
+- **Runs where you work:** a web app served from your machine, a desktop app
+  for Linux and Windows, and an Android app. Light and dark themes.
+
+![A mind map of the notebook's sources, every topic open](docs/screenshots/mind-map.png)
+
+<p>
+  <img src="docs/screenshots/answer-dark.png" alt="The same answer in the dark theme" width="72%">
+  <img src="docs/screenshots/phone.png" alt="The notebook on a phone" width="24%">
+</p>
+
+## Download
+
+Builds for Linux (`.deb`, AppImage), Windows (portable `.zip`) and Android
+(64-bit ARM `.apk`) are attached to each
+[release](https://github.com/jolovicdev/bowerbird/releases). To build from
+source, see [Build and run](#build-and-run).
+
+## How it works
+
+1. A source is extracted to text with its heading tree: PDF bookmarks or
+   font sizes, HTML and Markdown headings, EPUB and Word structure. Scanned
+   PDFs and recordings are first read by OCR or Whisper in the background.
+2. The text is split into passages and indexed in SQLite with FTS5. The
+   source is searchable as soon as that finishes.
+3. In the background, each passage gets an EmbeddingGemma vector. Until a
+   passage has one, keyword search answers alone.
+4. A question's keyword hits and nearest passages by meaning are fused, each
+   hit brings its neighbors in the same section, and a source that ranks
+   among the candidates gets its best passage even if it misses the top 8.
+   **Deep search** also lets the model pick whole sections from the outline.
+5. The model answers with citations to passage labels such as `B12`, and each
+   quoted span is matched against that passage's text.
+
+## Models
+
+The default model is `deepseek-flash`. Any provider that
+[genai](https://github.com/jeremychone/rust-genai) supports works, including
+OpenAI, Anthropic, Gemini, DeepSeek, Mistral, Groq, xAI, OpenRouter and
+Ollama. In Settings, enter the model name (prefix it with the provider, as in
+`groq::model-name`, to choose the provider yourself) and paste the provider's
+API key.
+
+Keys are saved in `settings.toml`, readable only by your user account:
+`~/.config/bowerbird/` on Linux and macOS, `%APPDATA%\bowerbird\` on Windows,
+or the path in `$BOWERBIRD_CONFIG`. A key set as an environment variable,
+such as `DEEPSEEK_API_KEY`, works too.
+
+The local models download on first use into `~/.local/share/bowerbird/models`
+(`%LOCALAPPDATA%\bowerbird\models` on Windows): EmbeddingGemma 4-bit for
+search (200 MB) when the first source is added, the OCR models (12 MB) for
+the first scanned PDF, and the speech models when they are first used.
+
+## Your data
+
+Each notebook is a folder in `~/Bowerbird`, or in `$BOWERBIRD_HOME`:
+
+```text
+<notebook>/
+  notebook.toml            title, answer style, sources (order, letters)
+  sources/                 originals as added, plus OCR text and transcripts
+  notes/<id>.md            Markdown notes
+  chats/<id>.jsonl         one conversation: questions, answers, citations
+  studio/<id>.json         flashcards, quizzes and other study material
+  guide.json               overview and suggested questions
+  .bowerbird/index.sqlite  search index and vectors, rebuilt when missing
+```
+
+Copying the folder backs up or moves the notebook.
+
+## Build and run
+
+Needs Rust 1.95 or newer and Node.js 22.17 or newer. On Debian or Ubuntu,
+install the build tools and the desktop app's libraries first:
+
+```sh
+sudo apt-get install cmake clang libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+```sh
+scripts/fetch-pdfium.sh                  # PDFium, which reads PDFs, into vendor/pdfium
+export BOWERBIRD_PDFIUM_DIR="$PWD/vendor/pdfium/lib"
+npm --prefix ui ci
+npm --prefix ui run build
+cargo run --release -p bowerbird-server
+```
+
+The server prints a link with an access token. Open it in a browser. It
+listens on `127.0.0.1:7477`; `--addr` changes that, and anything other than
+a loopback address exposes your notebooks to the network, protected only by
+the token.
+
+### Command line
+
+The `bowerbird` command works on the same library:
+
+```sh
+cargo run --release -p bowerbird -- add history treaty.pdf https://en.wikipedia.org/wiki/Peace_of_Westphalia
+cargo run --release -p bowerbird -- ask history "Who signed the treaty at Osnabrück?"
+```
+
+### Desktop app
+
+On Linux, install [Tauri's prerequisites](https://v2.tauri.app/start/prerequisites/),
+then:
+
+```sh
+ui/node_modules/.bin/tauri build --config crates/desktop/tauri.conf.json
+```
+
+The `.deb` and AppImage land in `target/release/bundle/`.
+
+The Windows app cross-compiles from Linux with
+[cargo-xwin](https://github.com/rust-cross/cargo-xwin) (needs clang 19 or
+newer, lld and llvm):
+
+```sh
+scripts/windows.sh
+```
+
+The portable folder lands in `dist/bowerbird-windows`: `Bowerbird.exe` with
+`DirectML.dll` and `pdfium\pdfium.dll` beside it.
+
+### Android
+
+```sh
+scripts/android.sh
+```
+
+Builds a 64-bit ARM APK signed with the debug key. Needs the Android SDK and
+NDK, found through `ANDROID_HOME` and `NDK_HOME`.
+
+## Tests
+
+```sh
+cargo test --workspace
+npm --prefix ui run check
+ui/node_modules/.bin/playwright install chromium     # once
+cargo build -p bowerbird-server && npm --prefix ui run test:e2e
+BOWERBIRD_LIVE=1 cargo test -p bowerbird-core --test live
+BOWERBIRD_LIVE=1 cargo test -p bowerbird-core --lib -- "ocr::" "embed::"
+```
+
+The end-to-end tests and the live test ask the default model real questions,
+so they need `DEEPSEEK_API_KEY`. The end-to-end tests serve the UI from
+`ui/build`, so build it first. The live test also checks YouTube captions,
+web page extraction and DuckDuckGo; the last line downloads the OCR and
+search models and reads a scanned page.
+
+`node ui/scripts/readme-screenshots.mjs <url> <token> docs/screenshots`
+rebuilds the demo notebook and the screenshots above. Run it against a
+server whose `--library` is an empty folder; it asks the configured model real
+questions.
+
+### Continuous integration
+
+- `.github/workflows/ci.yml`, on every push and pull request: formatting,
+  clippy with warnings as errors, the workspace tests, the UI type check, and
+  `cargo deny` for licenses (`deny.toml`) and advisories.
+- `.github/workflows/live.yml`, daily: the live tests and the end-to-end
+  tests. Needs the `DEEPSEEK_API_KEY` repository secret.
+- `.github/workflows/release.yml`, weekly and on `v*` tags: the Linux,
+  Windows and Android builds; a tag publishes them as a GitHub release.
+
+## License
+
+[MIT](LICENSE)

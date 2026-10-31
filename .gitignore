@@ -1,0 +1,10 @@
+.env
+target/
+node_modules/
+ui/build/
+ui/.svelte-kit/
+vendor/
+crates/desktop/gen/schemas/
+ui/test-results/
+ui/playwright-report/
+dist/

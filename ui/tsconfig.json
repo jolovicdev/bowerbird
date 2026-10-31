@@ -1,0 +1,8 @@
+{
+	"extends": "$app/tsconfig",
+	"include": ["src", "*"],
+	"exclude": ["src/service-worker", "playwright.config.ts"],
+	"compilerOptions": {
+		"strict": true
+	}
+}

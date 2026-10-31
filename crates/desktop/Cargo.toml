@@ -1,0 +1,21 @@
+[package]
+name = "bowerbird-desktop"
+version = "0.1.0"
+authors = ["jolovicdev"]
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "bowerbird_desktop_lib"
+# The phone app is this library, loaded by Android.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+axum = "0.8"
+bowerbird-core = { version = "0.1.0", path = "../core" }
+bowerbird-server = { version = "0.1.0", path = "../server" }
+tauri = { version = "2.12", features = [] }
+tokio = { version = "1.54", features = ["net"] }
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }

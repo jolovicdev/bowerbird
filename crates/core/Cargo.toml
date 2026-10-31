@@ -5,7 +5,7 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-dom_smoothie = "0.18"
+dom_smoothie = "0.19"
 # Pinned with ort =2.0.0-rc.13, which bowerbird-speech's Kokoro shares; two
 # ort versions can't link into one binary.
 fastembed = { version = "=7.1.1", default-features = false, features = ["ort-download-binaries-rustls-tls"] }

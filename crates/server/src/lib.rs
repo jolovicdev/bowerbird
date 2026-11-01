@@ -29,6 +29,7 @@ use bowerbird_core::index::Index;
 use bowerbird_core::notebook::Notebook;
 use bowerbird_core::retrieve::{self, Context};
 use bowerbird_core::settings::Settings;
+use bowerbird_core::web;
 use serde::Serialize;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -46,6 +47,9 @@ pub struct Config {
     /// Where Settings saves, and what it holds at startup.
     pub settings_path: PathBuf,
     pub settings: Settings,
+    /// The server listens on a loopback address, so only this machine reaches
+    /// it. Only then may an added link point at this machine or its network.
+    pub local_only: bool,
 }
 
 /// Largest request body any API route takes: one uploaded file with its form
@@ -70,6 +74,8 @@ struct AppState {
     speech: Arc<tokio::sync::Mutex<()>>,
     /// Held by the notebook whose chunks are being embedded.
     embedding: Arc<tokio::sync::Mutex<()>>,
+    /// Where links added through the API may be fetched from.
+    reach: web::Reach,
 }
 
 impl AppState {
@@ -93,6 +99,11 @@ pub fn router(config: Config) -> Router {
         jobs: Arc::default(),
         speech: Arc::default(),
         embedding: Arc::default(),
+        reach: if config.local_only {
+            web::Reach::Any
+        } else {
+            web::Reach::Public
+        },
     };
     let api = Router::new()
         .route(
@@ -411,6 +422,7 @@ mod tests {
             ui_dir: None,
             settings_path: dir.join("settings.toml"),
             settings: Settings::default(),
+            local_only: true,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

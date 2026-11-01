@@ -2,6 +2,7 @@
 //! readable article as Markdown, without link targets and images.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use dom_smoothie::{Config, Readability, TextMode};
@@ -11,6 +12,19 @@ use crate::doc::{self, CAPTION_CHARS, Doc, FIGURE_MIN_HEIGHT, FIGURE_MIN_WIDTH, 
 use crate::{Error, Result, youtube};
 
 const TIMEOUT: Duration = Duration::from_secs(20);
+/// Largest page or linked file read: the size of the largest upload.
+const PAGE_BYTES_MAX: usize = 200 * 1024 * 1024;
+
+/// Where a fetch may connect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reach {
+    /// Anywhere, this machine and its local network included.
+    Any,
+    /// The public internet only. For addresses a page chooses, and for links
+    /// added while the server is open to other machines, so neither reaches
+    /// what only the server can, such as a cloud metadata service.
+    Public,
+}
 
 /// A fetched page, kept as bytes since a link may point at a PDF.
 pub struct Page {
@@ -50,7 +64,7 @@ pub fn file_name(url: &str) -> String {
         .unwrap_or_else(|| url.to_string())
 }
 
-pub async fn fetch(url: &str) -> Result<Page> {
+pub async fn fetch(url: &str, reach: Reach) -> Result<Page> {
     if let Some(id) = youtube::video_id(url) {
         return Ok(Page {
             content_type: String::new(),
@@ -58,8 +72,10 @@ pub async fn fetch(url: &str) -> Result<Page> {
             transcript: Some(youtube::transcript(&id).await?),
         });
     }
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("Bowerbird/", env!("CARGO_PKG_VERSION")))
+    if !host_allowed(url, reach) {
+        return Err(Error::Http(private_message(&host(url))));
+    }
+    let client = client(reach)
         .timeout(TIMEOUT)
         .build()
         .map_err(|e| Error::Http(e.to_string()))?;
@@ -81,12 +97,147 @@ pub async fn fetch(url: &str) -> Result<Page> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let bytes = response.bytes().await.map_err(|e| fetch_error(url, &e))?;
+    let bytes = body(response, PAGE_BYTES_MAX)
+        .await
+        .map_err(|e| fetch_error(url, &e))?
+        .ok_or_else(|| {
+            Error::Invalid(format!(
+                "The file at {} is larger than {} MB, the most Bowerbird reads from a link.",
+                host(url),
+                PAGE_BYTES_MAX >> 20
+            ))
+        })?;
     Ok(Page {
         content_type,
-        bytes: bytes.to_vec(),
+        bytes,
         transcript: None,
     })
+}
+
+/// Reads a response body, or `None` once it passes `max` bytes, never
+/// holding more than that.
+async fn body(mut response: reqwest::Response, max: usize) -> reqwest::Result<Option<Vec<u8>>> {
+    if response.content_length().is_some_and(|n| n > max as u64) {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if bytes.len() + chunk.len() > max {
+            return Ok(None);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(Some(bytes))
+}
+
+/// A client that connects only where `reach` allows. Host names are checked
+/// as they resolve, which covers redirects and DNS answers that change;
+/// redirects to an address written out as numbers are checked as they come.
+fn client(reach: Reach) -> reqwest::ClientBuilder {
+    let builder =
+        reqwest::Client::builder().user_agent(concat!("Bowerbird/", env!("CARGO_PKG_VERSION")));
+    match reach {
+        Reach::Any => builder,
+        Reach::Public => {
+            builder
+                .dns_resolver(PublicOnly)
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() >= 10 {
+                        attempt.error("too many redirects")
+                    } else if host_allowed(attempt.url().as_str(), Reach::Public) {
+                        attempt.follow()
+                    } else {
+                        attempt.error(PrivateAddress)
+                    }
+                }))
+        }
+    }
+}
+
+/// False for a URL whose host is an address off the public internet, written
+/// out as numbers, when only the public internet may be reached. Host names
+/// are checked by `PublicOnly` instead.
+fn host_allowed(url: &str, reach: Reach) -> bool {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string));
+    match host.map(|h| h.trim_matches(['[', ']']).parse::<IpAddr>()) {
+        Some(Ok(ip)) => reach == Reach::Any || is_public(ip),
+        _ => true,
+    }
+}
+
+/// Whether an address is on the public internet: not this machine, a local
+/// network, or a range reserved for something else.
+fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, ..] = ip.octets();
+            !(ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_multicast()
+                || a == 0
+                || a >= 240
+                // Carrier-grade NAT, and benchmarking.
+                || (a == 100 && (64..128).contains(&b))
+                || (a == 198 && (b == 18 || b == 19)))
+        }
+        IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_public(v4.into());
+            }
+            // NAT64 carries an IPv4 address in its last 32 bits.
+            if let [0x64, 0xff9b, 0, 0, 0, 0, hi, lo] = ip.segments() {
+                return is_public(Ipv4Addr::from((u32::from(hi) << 16) | u32::from(lo)).into());
+            }
+            !(ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_multicast()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local())
+        }
+    }
+}
+
+/// Resolves host names to their public addresses only.
+struct PublicOnly;
+
+impl reqwest::dns::Resolve for PublicOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .filter(|addr| is_public(addr.ip()))
+                .collect();
+            if addrs.is_empty() {
+                return Err(PrivateAddress.into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// A connection refused because it would leave the public internet.
+#[derive(Debug)]
+struct PrivateAddress;
+
+impl std::fmt::Display for PrivateAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the address is on this machine or a private network")
+    }
+}
+
+impl std::error::Error for PrivateAddress {}
+
+fn private_message(host: &str) -> String {
+    format!(
+        "{host} is on this machine or a private network, which links can't reach while Bowerbird is open to other machines."
+    )
 }
 
 /// Most pictures saved from one page.
@@ -111,12 +262,10 @@ pub fn figure_sources(page: &Page, url: &str) -> Vec<String> {
 /// Fetches pictures to save beside a page, a few at a time: each as its
 /// address, file extension and bytes. A picture that fails, isn't a format
 /// browsers show, or is too large is left out; the page is worth adding
-/// without it.
+/// without it. The page chose these addresses, so only the public internet
+/// is reached.
 pub async fn fetch_images(srcs: &[String]) -> Vec<(String, &'static str, Vec<u8>)> {
-    let Ok(client) = reqwest::Client::builder()
-        .user_agent(concat!("Bowerbird/", env!("CARGO_PKG_VERSION")))
-        .build()
-    else {
+    let Ok(client) = client(Reach::Public).build() else {
         return Vec::new();
     };
     let deadline = tokio::time::Instant::now() + IMAGES_TIME;
@@ -124,6 +273,9 @@ pub async fn fetch_images(srcs: &[String]) -> Vec<(String, &'static str, Vec<u8>
         .map(|src| {
             let client = client.clone();
             let fetch = async move {
+                if !host_allowed(&src, Reach::Public) {
+                    return None;
+                }
                 let response = client
                     .get(&src)
                     .send()
@@ -147,14 +299,8 @@ pub async fn fetch_images(srcs: &[String]) -> Vec<(String, &'static str, Vec<u8>
                     "image/webp" => "webp",
                     _ => return None,
                 };
-                if response
-                    .content_length()
-                    .is_some_and(|n| n > IMAGE_BYTES_MAX as u64)
-                {
-                    return None;
-                }
-                let bytes = response.bytes().await.ok()?;
-                (bytes.len() <= IMAGE_BYTES_MAX).then(|| (src, ext, bytes.to_vec()))
+                let bytes = body(response, IMAGE_BYTES_MAX).await.ok()??;
+                Some((src, ext, bytes))
             };
             async move {
                 tokio::time::timeout_at(deadline, fetch)
@@ -169,13 +315,21 @@ pub async fn fetch_images(srcs: &[String]) -> Vec<(String, &'static str, Vec<u8>
         .await
 }
 
-/// Says what went wrong in words a reader can act on, naming the site.
-fn fetch_error(url: &str, error: &reqwest::Error) -> Error {
-    let host = reqwest::Url::parse(url)
+fn host(url: &str) -> String {
+    reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
-        .unwrap_or_else(|| url.to_string());
-    let message = if error.is_builder() {
+        .unwrap_or_else(|| url.to_string())
+}
+
+/// Says what went wrong in words a reader can act on, naming the site.
+fn fetch_error(url: &str, error: &reqwest::Error) -> Error {
+    let host = host(url);
+    let private = std::iter::successors(std::error::Error::source(error), |e| e.source())
+        .any(|e| e.is::<PrivateAddress>());
+    let message = if private {
+        private_message(&host)
+    } else if error.is_builder() {
         format!("“{url}” isn't a web address Bowerbird can open.")
     } else if error.is_timeout() {
         format!(
@@ -691,6 +845,86 @@ fn link(s: &str) -> Option<(&str, &str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    /// A server on a free loopback port answering every request with `body`,
+    /// without a length, so the body ends when the connection closes.
+    async fn serve(body: Vec<u8>) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut request = [0; 4096];
+                    let _ = stream.read(&mut request).await;
+                    let head =
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                });
+            }
+        });
+        port
+    }
+
+    #[test]
+    fn only_internet_addresses_count_as_public() {
+        for ip in [
+            "127.0.0.1",
+            "10.0.0.8",
+            "172.20.1.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "::1",
+            "fe80::1",
+            "fd00::1",
+            "::ffff:127.0.0.1",
+            "64:ff9b::a9fe:a9fe",
+        ] {
+            assert!(!is_public(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            "93.184.216.34",
+            "1.1.1.1",
+            "2606:4700:4700::1111",
+            "64:ff9b::808:808",
+        ] {
+            assert!(is_public(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[tokio::test]
+    async fn links_off_the_internet_are_fetched_only_when_any_address_may_be() {
+        let port = serve(b"<html><title>Local</title></html>".to_vec()).await;
+        for url in [
+            format!("http://127.0.0.1:{port}/"),
+            format!("http://localhost:{port}/"),
+        ] {
+            let refused = fetch(&url, Reach::Public)
+                .await
+                .err()
+                .map(|e| e.to_string());
+            assert!(
+                refused.is_some_and(|e| e.contains("private network")),
+                "{url}"
+            );
+            assert!(fetch(&url, Reach::Any).await.is_ok(), "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bodies_stop_at_their_limit() {
+        let port = serve(vec![b'x'; 5000]).await;
+        let url = format!("http://127.0.0.1:{port}/");
+        let over = body(reqwest::get(&url).await.unwrap(), 4096).await.unwrap();
+        assert!(over.is_none());
+        let within = body(reqwest::get(&url).await.unwrap(), 8192).await.unwrap();
+        assert_eq!(within.map(|b| b.len()), Some(5000));
+    }
 
     #[test]
     fn tidy_keeps_link_words_and_drops_link_targets() {

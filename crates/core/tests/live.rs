@@ -109,7 +109,7 @@ async fn web_pages_still_extract() {
         return;
     }
     let url = "https://en.wikipedia.org/wiki/Peace_of_Westphalia";
-    let page = web::fetch(url).await.unwrap();
+    let page = web::fetch(url, web::Reach::Public).await.unwrap();
     let (title, doc) = web::extract(&page.html().unwrap(), Some(url)).unwrap();
     assert!(title.contains("Westphalia"), "{title}");
     assert!(doc.text.contains("Osnabrück"), "article text is missing");

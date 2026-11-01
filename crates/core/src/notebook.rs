@@ -12,7 +12,7 @@
 //! ```
 
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -193,6 +193,16 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// A single file name, so joining it to `sources/` can't leave that folder.
+/// Backslashes and colons are refused too: on Windows they separate paths.
+fn plain_file_name(name: &str) -> bool {
+    let mut parts = Path::new(name).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(Component::Normal(_)), None)
+    ) && !name.contains(['/', '\\', ':'])
+}
+
 fn unix_secs(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
@@ -212,9 +222,22 @@ fn split_note(raw: &str) -> (String, String) {
 }
 
 impl Notebook {
+    /// A notebook folder may come from someone else, so every path its
+    /// notebook.toml names must stay inside the folder: source files are read
+    /// and deleted through them.
     pub fn open(dir: &Path) -> Result<Notebook> {
         let raw = std::fs::read_to_string(dir.join("notebook.toml"))?;
         let file: NotebookFile = toml::from_str(&raw).map_err(|e| Error::Toml(e.to_string()))?;
+        if let Some(bad) = file
+            .sources
+            .iter()
+            .find(|s| !valid_id(&s.id) || !plain_file_name(&s.file))
+        {
+            return Err(Error::Toml(format!(
+                "source “{}” names a file outside the notebook",
+                bad.title
+            )));
+        }
         Ok(Notebook {
             dir: dir.to_path_buf(),
             title: file.title,
@@ -435,11 +458,13 @@ impl Notebook {
         )
     }
 
+    /// Fetches and adds a link. For the command line, which only this machine
+    /// runs, so the link may point anywhere.
     pub async fn add_url(&mut self, url: &str) -> Result<Source> {
         if let Some(existing) = self.source_with_url(url) {
             return Ok(existing.clone());
         }
-        let page = web::fetch(url).await?;
+        let page = web::fetch(url, web::Reach::Any).await?;
         self.add_web_page(url, &page)
     }
 
@@ -834,6 +859,33 @@ mod tests {
             .collect();
         assert_eq!(letters, ["A", "C"]);
         assert_eq!(nb.add_text("Four", "Regent bowers.").unwrap().letter, "D");
+    }
+
+    #[test]
+    fn notebooks_naming_files_outside_their_folder_do_not_open() {
+        let dir = std::env::temp_dir().join(format!("bowerbird-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let nb = Notebook::open_or_create(&dir, "Birds").unwrap();
+        let source = |id: &str, file: &str| {
+            format!(
+                "title = \"Birds\"\n\n[[source]]\nid = \"{id}\"\ntitle = \"T\"\nkind = \"text\"\nfile = '{file}'\nletter = \"A\"\ncolor = 0\n"
+            )
+        };
+        for (id, file) in [
+            ("a1b2c3d4e5f6", "../../escape.txt"),
+            ("a1b2c3d4e5f6", "/etc/hostname"),
+            ("a1b2c3d4e5f6", r"..\escape.txt"),
+            ("../../escape", "a1b2c3d4e5f6.txt"),
+        ] {
+            std::fs::write(dir.join("notebook.toml"), source(id, file)).unwrap();
+            assert!(Notebook::open(&nb.dir).is_err(), "{id} {file}");
+        }
+        std::fs::write(
+            dir.join("notebook.toml"),
+            source("a1b2c3d4e5f6", "a1b2c3d4e5f6.txt"),
+        )
+        .unwrap();
+        assert_eq!(Notebook::open(&nb.dir).unwrap().sources.len(), 1);
     }
 
     #[test]

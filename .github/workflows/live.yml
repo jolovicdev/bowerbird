@@ -31,7 +31,7 @@ jobs:
         env:
           BOWERBIRD_LIVE: "1"
       - name: Model downloads, OCR and search by meaning
-        run: cargo test -p bowerbird-core --lib --locked -- "ocr::" "embed::"
+        run: cargo test -p bowerbird-core --lib --locked -- "ocr::" "embed::" "retrieve::"
         env:
           BOWERBIRD_LIVE: "1"
 

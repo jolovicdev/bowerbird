@@ -44,6 +44,7 @@ async fn main() -> std::io::Result<()> {
         ui_dir,
         settings_path,
         settings,
+        local_only: args.addr.ip().is_loopback(),
     });
     let listener = tokio::net::TcpListener::bind(args.addr).await?;
     if !args.addr.ip().is_loopback() {

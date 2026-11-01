@@ -95,8 +95,21 @@ impl Picker {
     }
 }
 
+/// Passages for a question: its hits, each with its neighbors. A question no
+/// keyword matches, such as "Summarize the key points" or one worded unlike
+/// the sources, also gets an overview of every source in the room the
+/// passages nearest in meaning leave.
 pub fn gather(index: &Index, nb: &Notebook, question: &str) -> Result<Context> {
-    gather_from_hits(index, nb, rank(index, nb, question)?)
+    let (hits, keyword_matched) = rank(index, nb, question)?;
+    let mut picker = Picker::default();
+    pick_hits(index, &hits, &mut picker)?;
+    if !keyword_matched {
+        pick_overview(index, nb, &mut picker)?;
+    }
+    Ok(Context {
+        passages: picker.into_passages(nb),
+        hits,
+    })
 }
 
 /// What to search for a question. A short follow-up such as "why?" has too
@@ -130,12 +143,20 @@ pub fn foreign_question(index: &Index, nb: &Notebook, search: &str) -> Result<Op
     Ok((!openings.is_empty()).then(|| openings.join("\n\n")))
 }
 
-/// Passages for a question no keyword matches, such as "Summarize the key
-/// points": the opening of each section in every source, then the text that
-/// follows, with the budget shared evenly between sources.
+/// An overview of every source: the opening of each section, then the text
+/// that follows, with the budget shared evenly between sources.
 pub fn gather_overview(index: &Index, nb: &Notebook) -> Result<Context> {
     let mut picker = Picker::default();
-    let share = CHAR_BUDGET / nb.included().count().max(1);
+    pick_overview(index, nb, &mut picker)?;
+    Ok(Context {
+        passages: picker.into_passages(nb),
+        hits: Vec::new(),
+    })
+}
+
+/// Adds an overview of every source in the budget `picker` has left.
+fn pick_overview(index: &Index, nb: &Notebook, picker: &mut Picker) -> Result<()> {
+    let share = (CHAR_BUDGET - picker.used) / nb.included().count().max(1);
     for source in nb.included() {
         let rows = index.chunks_between(&source.id, 0, usize::MAX)?;
         let opens_section = |i: usize| i == 0 || rows[i].section != rows[i - 1].section;
@@ -151,16 +172,14 @@ pub fn gather_overview(index: &Index, nb: &Notebook) -> Result<Context> {
             picker.add(rows[i].clone());
         }
     }
-    Ok(Context {
-        passages: picker.into_passages(nb),
-        hits: Vec::new(),
-    })
+    Ok(())
 }
 
 /// The top hits in the sources answers use, plus the best hit of each source
-/// that ranks among the candidates but not in the top `HITS`. Keyword hits are
-/// fused with hits by meaning once the search model and vectors are there.
-pub fn rank(index: &Index, nb: &Notebook, question: &str) -> Result<Vec<Hit>> {
+/// that ranks among the candidates but not in the top `HITS`, and whether any
+/// keyword matched. Keyword hits are fused with hits by meaning once the
+/// search model and vectors are there.
+pub fn rank(index: &Index, nb: &Notebook, question: &str) -> Result<(Vec<Hit>, bool)> {
     // Loading the model takes a second or two; skip it while nothing is embedded.
     let embedder = if index.vector_count()? > 0 {
         Embedder::shared()
@@ -176,18 +195,13 @@ pub fn rank(index: &Index, nb: &Notebook, question: &str) -> Result<Vec<Hit>> {
         Some(ids) => index.search_in(question, CANDIDATES, ids)?,
         None => index.search(question, CANDIDATES)?,
     };
-    // A question no keyword matches, such as "Summarize the key points", is
-    // answered from an overview of every source, not from the few nearest chunks.
-    if keyword.is_empty() {
-        return Ok(keyword);
-    }
     let dense = match embedder.as_deref() {
         Some(embedder) => {
             index.dense_search(&embedder.query(question)?, CANDIDATES, filter.as_deref())?
         }
         None => Vec::new(),
     };
-    Ok(diversify(fuse(&keyword, &dense)))
+    Ok((diversify(fuse(&keyword, &dense)), !keyword.is_empty()))
 }
 
 /// Weighted reciprocal rank fusion: each list adds weight / (k + rank) to a
@@ -229,10 +243,9 @@ pub fn diversify(candidates: Vec<Hit>) -> Vec<Hit> {
 }
 
 /// Ranked hits first, then each hit's neighbors within the same section.
-fn gather_from_hits(index: &Index, nb: &Notebook, hits: Vec<Hit>) -> Result<Context> {
-    let mut picker = Picker::default();
+fn pick_hits(index: &Index, hits: &[Hit], picker: &mut Picker) -> Result<()> {
     let mut hit_rows = Vec::new();
-    for hit in &hits {
+    for hit in hits {
         if let Some(row) = index.chunk(&hit.source_id, hit.ord)? {
             hit_rows.push(row.clone());
             picker.add(row);
@@ -250,10 +263,7 @@ fn gather_from_hits(index: &Index, nb: &Notebook, hits: Vec<Hit>) -> Result<Cont
             }
         }
     }
-    Ok(Context {
-        passages: picker.into_passages(nb),
-        hits,
-    })
+    Ok(())
 }
 
 /// Keyword hits first, then the chunks of each picked section, within the budget.
@@ -263,7 +273,7 @@ pub fn gather_with_sections(
     question: &str,
     picks: &[SectionRef],
 ) -> Result<Context> {
-    let hits = rank(index, nb, question)?;
+    let (hits, _) = rank(index, nb, question)?;
     let mut picker = Picker::default();
     for hit in &hits {
         if let Some(row) = index.chunk(&hit.source_id, hit.ord)? {
@@ -405,13 +415,10 @@ mod tests {
         nb.add_text("Vogelkop", "Moss mats sorted by color.")
             .unwrap();
         let (index, _) = Index::open_synced(&nb).unwrap();
-        assert!(
-            gather(&index, &nb, "Summarize the key points")
-                .unwrap()
-                .passages
-                .is_empty()
-        );
-        let passages = gather_overview(&index, &nb).unwrap().passages;
+        let passages = gather(&index, &nb, "Summarize the key points")
+            .unwrap()
+            .passages;
+        assert_eq!(passages, gather_overview(&index, &nb).unwrap().passages);
         assert!(
             passages.iter().any(|p| p.label == "B0"),
             "every source gets passages"
@@ -428,6 +435,52 @@ mod tests {
             .map(|p| p.text.len())
             .sum();
         assert!(satin <= CHAR_BUDGET / 2);
+    }
+
+    /// Downloads the search model (about 200 MB), so it runs only with
+    /// BOWERBIRD_LIVE=1.
+    #[tokio::test]
+    async fn questions_worded_unlike_the_sources_are_found_by_meaning() {
+        if std::env::var("BOWERBIRD_LIVE").as_deref() != Ok("1") {
+            eprintln!("skipped: set BOWERBIRD_LIVE=1 to download the search model");
+            return;
+        }
+        crate::embed::download(&crate::embed::dir(), |_, _| {})
+            .await
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("bowerbird-meaning-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut nb = Notebook::open_or_create(&dir, "Birds").unwrap();
+        nb.add_text(
+            "Tax",
+            "Value added tax is charged at each stage of production.",
+        )
+        .unwrap();
+        let bowers = nb
+            .add_text(
+                "Bowers",
+                "The male gathers blue bottle caps and berries to decorate his bower.",
+            )
+            .unwrap();
+        let (mut index, _) = Index::open_synced(&nb).unwrap();
+        let embedder = Embedder::shared().unwrap();
+        let rows = index.unembedded(10).unwrap();
+        let vectors = embedder.documents(&rows).unwrap();
+        index.store_vectors(&rows, &vectors).unwrap();
+
+        let question = "Which colours does the bird collect?";
+        assert!(index.search(question, CANDIDATES).unwrap().is_empty());
+        let (hits, keyword_matched) = rank(&index, &nb, question).unwrap();
+        assert!(!keyword_matched);
+        assert_eq!(
+            hits.first().map(|h| h.source_id.as_str()),
+            Some(bowers.id.as_str())
+        );
+        let passages = gather(&index, &nb, question).unwrap().passages;
+        assert!(
+            passages.iter().any(|p| p.label == "A0"),
+            "the overview still comes along"
+        );
     }
 
     #[test]

@@ -25,6 +25,9 @@ DROP TABLE IF EXISTS sources;
 const SCHEMA: &str = "
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
+-- Search by meaning reads every vector on each question; mapped reads skip a
+-- copy per page and make that scan several times faster.
+PRAGMA mmap_size = 1073741824;
 CREATE TABLE IF NOT EXISTS sources (
     id TEXT PRIMARY KEY,
     pages INTEGER
@@ -410,39 +413,58 @@ impl Index {
         limit: usize,
         source_ids: Option<&[&str]>,
     ) -> Result<Vec<Hit>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT c.id, v.source_id, v.ord, v.vector
-             FROM vectors v JOIN chunks c ON c.source_id = v.source_id AND c.ord = v.ord",
-        )?;
+        // Every vector is scored, so the scan reads each one in place and keeps
+        // only the best few; vectors exist only for stored chunks, so chunk
+        // ids are looked up for those few alone.
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT source_id, ord, vector FROM vectors")?;
         let mut rows = stmt.query([])?;
-        let mut scored: Vec<Hit> = Vec::new();
+        let mut scored: Vec<(f32, String, u32)> = Vec::new();
         while let Some(row) = rows.next()? {
-            let source_id: String = row.get(1)?;
-            if source_ids.is_some_and(|ids| !ids.contains(&source_id.as_str())) {
+            let source_id = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
+            if source_ids.is_some_and(|ids| !ids.contains(&source_id)) {
                 continue;
             }
-            let vector: Vec<u8> = row.get(3)?;
-            let score = vector
+            let score = row
+                .get_ref(2)?
+                .as_blob()
+                .map_err(rusqlite::Error::from)?
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .zip(query)
                 .map(|(b, q)| f32::from_le_bytes(*b) * q)
                 .sum::<f32>();
-            scored.push(Hit {
-                chunk_id: row.get(0)?,
-                source_id,
-                ord: row.get(2)?,
-                score: f64::from(score),
-            });
+            scored.push((score, source_id.to_string(), row.get(1)?));
         }
-        scored.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then(a.chunk_id.cmp(&b.chunk_id))
-        });
-        scored.truncate(limit);
-        Ok(scored)
+        let best_first = |a: &(f32, String, u32), b: &(f32, String, u32)| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| (&a.1, a.2).cmp(&(&b.1, b.2)))
+        };
+        if scored.len() > limit {
+            scored.select_nth_unstable_by(limit, best_first);
+            scored.truncate(limit);
+        }
+        scored.sort_by(best_first);
+        let mut chunk_id = self
+            .conn
+            .prepare_cached("SELECT id FROM chunks WHERE source_id = ?1 AND ord = ?2")?;
+        let mut hits = Vec::with_capacity(scored.len());
+        for (score, source_id, ord) in scored {
+            if let Some(id) = chunk_id
+                .query_row(params![source_id, ord], |r| r.get(0))
+                .optional()?
+            {
+                hits.push(Hit {
+                    chunk_id: id,
+                    source_id,
+                    ord,
+                    score: f64::from(score),
+                });
+            }
+        }
+        Ok(hits)
     }
 
     pub fn chunk(&self, source_id: &str, ord: u32) -> Result<Option<ChunkRow>> {
@@ -745,6 +767,13 @@ mod tests {
             near(&[0.0, 1.0], Some(&[satin.id.as_str()])),
             [(satin.id.clone(), 1), (satin.id.clone(), 0)]
         );
+        let best_two: Vec<(String, u32)> = index
+            .dense_search(&[0.0, 1.0], 2, None)
+            .unwrap()
+            .into_iter()
+            .map(|h| (h.source_id, h.ord))
+            .collect();
+        assert_eq!(best_two, [(vogelkop.id.clone(), 0), (satin.id.clone(), 1)]);
 
         index.remove(&satin.id).unwrap();
         assert_eq!(index.vector_count().unwrap(), 1);

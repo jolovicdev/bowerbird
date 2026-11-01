@@ -1,20 +1,31 @@
 # Bowerbird
 
-A research notebook for your own sources. Add PDFs, books, web pages,
-YouTube videos and recordings, ask questions, and get answers where every
-quote is checked against the source it cites. Notebooks are plain folders on
-your disk, search and OCR run on your machine, and answers come from any
-model you choose.
+<img src="crates/desktop/icons/source/icon.svg" alt="" width="112" align="right">
+
+An open-source NotebookLM alternative where your files stay yours and every
+quote is checked.
+
+Add PDFs, books, web pages, YouTube videos and recordings, then ask
+questions. Answers cite the passages they draw on, and each quoted phrase is
+looked up in the source it cites. Notebooks are plain folders on your disk,
+search, OCR and speech run on your machine, and answers come from any model
+you choose.
 
 ![An answer about the Peace of Westphalia, with cited quotes in the margin](docs/screenshots/answer.png)
 
 ## Every quote is checked
 
 Each citation in an answer carries the words it quotes. Bowerbird looks those
-words up in the passage the citation points to. A quote that isn't there is
-marked unverified, and the footer counts how many were found. Click a
-citation to open the passage with the quoted words highlighted, or, for a
-PDF, the printed page.
+words up in the source the citation names: in the cited passage, or in a
+neighboring passage of the same source, since a quote can run across a
+passage boundary. A quote that isn't there, or that the answer attributes to
+the wrong source, is marked unverified, and the footer counts how many were
+found. A quote shortened with an ellipsis counts only when each of its
+pieces is long enough to stand on its own and the pieces sit close together.
+
+The check shows that the quoted words are in the source, not that the answer
+reads them correctly. Click a citation to open the passage with the quoted
+words highlighted, or, for a PDF, the printed page, and judge for yourself.
 
 ![The cited passage opened beside the answer, quoted words highlighted](docs/screenshots/passage.png)
 
@@ -40,7 +51,7 @@ PDF, the printed page.
 - **Finding sources:** search the web through DuckDuckGo, SearXNG, Brave,
   Tavily or Exa, and add what you pick.
 - **Runs where you work:** a web app served from your machine, a desktop app
-  for Linux and Windows, and an Android app. Light and dark themes.
+  for Linux, macOS and Windows, and an Android app. Light and dark themes.
 
 ![A mind map of the notebook's sources, every topic open](docs/screenshots/mind-map.png)
 
@@ -51,9 +62,11 @@ PDF, the printed page.
 
 ## Download
 
-Builds for Linux (`.deb`, AppImage), Windows (portable `.zip`) and Android
-(64-bit ARM `.apk`) are attached to each
-[release](https://github.com/jolovicdev/bowerbird/releases). To build from
+Builds for Linux (`.deb`, AppImage), macOS (Apple Silicon `.dmg`), Windows
+(portable `.zip`) and Android (64-bit ARM `.apk`) are attached to each
+[release](https://github.com/jolovicdev/bowerbird/releases). The macOS app is
+signed ad hoc, not notarized, so macOS blocks its first launch: allow it
+under System Settings, Privacy & Security, Open Anyway. To build from
 source, see [Build and run](#build-and-run).
 
 ## How it works
@@ -89,7 +102,9 @@ such as `DEEPSEEK_API_KEY`, works too.
 The local models download on first use into `~/.local/share/bowerbird/models`
 (`%LOCALAPPDATA%\bowerbird\models` on Windows): EmbeddingGemma 4-bit for
 search (200 MB) when the first source is added, the OCR models (12 MB) for
-the first scanned PDF, and the speech models when they are first used.
+the first scanned PDF, and the speech models when they are first used. Their
+licenses, including the Gemma Terms of Use that cover EmbeddingGemma, are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Your data
 
@@ -128,7 +143,8 @@ cargo run --release -p bowerbird-server
 The server prints a link with an access token. Open it in a browser. It
 listens on `127.0.0.1:7477`; `--addr` changes that, and anything other than
 a loopback address exposes your notebooks to the network, protected only by
-the token.
+the token. In that mode, links added through the app may only point at the
+public internet, not at the server's own machine or its local network.
 
 ### Command line
 
@@ -148,7 +164,9 @@ then:
 ui/node_modules/.bin/tauri build --config crates/desktop/tauri.conf.json
 ```
 
-The `.deb` and AppImage land in `target/release/bundle/`.
+The `.deb` and AppImage land in `target/release/bundle/`. On a Mac with
+Apple Silicon, run `scripts/fetch-pdfium.sh` first and add
+`--bundles app,dmg`; the `.dmg` lands in `target/release/bundle/dmg/`.
 
 The Windows app cross-compiles from Linux with
 [cargo-xwin](https://github.com/rust-cross/cargo-xwin) (needs clang 19 or
@@ -159,7 +177,7 @@ scripts/windows.sh
 ```
 
 The portable folder lands in `dist/bowerbird-windows`: `Bowerbird.exe` with
-`DirectML.dll` and `pdfium\pdfium.dll` beside it.
+`DirectML.dll`, `pdfium\pdfium.dll` and the licenses beside it.
 
 ### Android
 
@@ -167,8 +185,11 @@ The portable folder lands in `dist/bowerbird-windows`: `Bowerbird.exe` with
 scripts/android.sh
 ```
 
-Builds a 64-bit ARM APK signed with the debug key. Needs the Android SDK and
-NDK, found through `ANDROID_HOME` and `NDK_HOME`.
+Builds a 64-bit ARM APK. Needs the Android SDK and NDK, found through
+`ANDROID_HOME` and `NDK_HOME`. The APK is signed with the release key that
+`crates/desktop/gen/android/keystore.properties` names (`storeFile`, relative
+to that folder, `keyAlias` and `password`; kept out of git), or with the
+debug key when that file is missing.
 
 ## Tests
 
@@ -178,7 +199,7 @@ npm --prefix ui run check
 ui/node_modules/.bin/playwright install chromium     # once
 cargo build -p bowerbird-server && npm --prefix ui run test:e2e
 BOWERBIRD_LIVE=1 cargo test -p bowerbird-core --test live
-BOWERBIRD_LIVE=1 cargo test -p bowerbird-core --lib -- "ocr::" "embed::"
+BOWERBIRD_LIVE=1 cargo test -p bowerbird-core --lib -- "ocr::" "embed::" "retrieve::"
 ```
 
 The end-to-end tests and the live test ask the default model real questions,
@@ -200,8 +221,14 @@ questions.
 - `.github/workflows/live.yml`, daily: the live tests and the end-to-end
   tests. Needs the `DEEPSEEK_API_KEY` repository secret.
 - `.github/workflows/release.yml`, weekly and on `v*` tags: the Linux,
-  Windows and Android builds; a tag publishes them as a GitHub release.
+  macOS, Windows and Android builds; a tag publishes them as a GitHub
+  release. The APK gets the release key from the `ANDROID_KEYSTORE`
+  (base64 of the keystore) and `ANDROID_KEYSTORE_PASSWORD` repository
+  secrets.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The software by others in the releases, and the models the
+app downloads, are listed with their licenses in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[ARCHITECTURE.md](ARCHITECTURE.md) describes how the code fits together.

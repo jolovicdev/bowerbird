@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Builds the Android app (64-bit ARM; onnxruntime ships no other Android
-# build) as an APK signed with the debug key. Needs the Android SDK and NDK:
-# ANDROID_HOME and NDK_HOME, or ~/Android/env.sh to set them.
+# build) as an APK, signed with the release key that
+# crates/desktop/gen/android/keystore.properties names, else the debug key.
+# Needs the Android SDK and NDK: ANDROID_HOME and NDK_HOME, or
+# ~/Android/env.sh to set them.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,8 +16,10 @@ SYSROOT="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$SYSROOT --target=aarch64-linux-android24"
 export CMAKE_TOOLCHAIN_FILE_aarch64_linux_android="$ROOT/scripts/android-arm64.toolchain.cmake"
 
-[ -f "$ROOT/crates/desktop/gen/android/app/src/main/jniLibs/arm64-v8a/libpdfium.so" ] \
+MAIN="$ROOT/crates/desktop/gen/android/app/src/main"
+[ -f "$MAIN/jniLibs/arm64-v8a/libpdfium.so" ] && [ -d "$MAIN/assets/notices/pdfium" ] \
   || "$ROOT/scripts/fetch-pdfium.sh" android
+cp -r "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/licenses" "$MAIN/assets/notices/"
 
 cd "$ROOT"
 ui/node_modules/.bin/tauri android build --target aarch64 --apk --ci "$@"

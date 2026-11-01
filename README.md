@@ -29,6 +29,26 @@ words highlighted, or, for a PDF, the printed page, and judge for yourself.
 
 ![The cited passage opened beside the answer, quoted words highlighted](docs/screenshots/passage.png)
 
+## What leaves your machine
+
+Notebooks, the search index, OCR, transcription and the voices of audio
+overviews stay on your machine. Bowerbird sends no analytics and doesn't
+check for updates. This is everything that goes out:
+
+| What | Where it goes | When |
+| --- | --- | --- |
+| Your question, the earlier turns of that conversation, and the parts of your sources found for it | The model provider you choose, DeepSeek by default | Each question |
+| The parts of your sources behind the notebook's overview | The same model provider | When you open a notebook whose sources changed |
+| The parts of your sources a report or study material draws on | The same model provider | Each time you make one |
+| A link you add | That website, and the sites its pictures are on | When you add it |
+| A YouTube video you add | YouTube, for the video's captions | When you add it |
+| A web search for sources | The search service set in Settings: your own SearXNG, DuckDuckGo, Brave, Tavily or Exa | Each search |
+| Requests for the local models | Hugging Face and GitHub; each file is checked against its recorded SHA-256 | Each model's first use |
+
+API keys go only to their own provider. Choose an
+[Ollama](https://ollama.com) model running on your machine, and questions and
+passages stay there too.
+
 ## What it does
 
 - **Sources:** PDF, Word (.docx), EPUB, Markdown, plain text, web pages,

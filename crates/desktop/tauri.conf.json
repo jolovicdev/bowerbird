@@ -21,6 +21,9 @@
     ],
     "category": "Education",
     "shortDescription": "Ask your own sources and check every answer",
+    "macOS": {
+      "signingIdentity": "-"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -29,7 +32,12 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../../vendor/pdfium/lib/": "pdfium/"
+      "../../vendor/pdfium/lib/": "pdfium/",
+      "../../vendor/pdfium/LICENSE": "pdfium/LICENSE",
+      "../../vendor/pdfium/licenses/": "pdfium/licenses/",
+      "../../LICENSE": "LICENSE",
+      "../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../../licenses/": "licenses/"
     }
   }
 }

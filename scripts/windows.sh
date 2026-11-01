@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cross-builds the Windows app from Linux with cargo-xwin into a portable
 # folder, dist/bowerbird-windows: Bowerbird.exe, DirectML.dll (onnxruntime's
-# GPU backend, loaded at run time) and pdfium\pdfium.dll.
+# GPU backend, loaded at run time), pdfium\pdfium.dll, and the licenses.
 # Needs cargo-xwin, clang, lld and llvm.
 set -euo pipefail
 
@@ -41,6 +41,8 @@ cp "$DML" "$OUT/"
 TMP="$(mktemp -d)"
 curl -fsSL "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${BUILD}/pdfium-win-x64.tgz" \
   | tar xz -C "$TMP"
-cp "$TMP/bin/pdfium.dll" "$OUT/pdfium/"
+cp "$TMP/bin/pdfium.dll" "$TMP/LICENSE" "$OUT/pdfium/"
+cp -r "$TMP/licenses" "$OUT/pdfium/"
 rm -rf "$TMP"
+cp -r LICENSE THIRD_PARTY_NOTICES.md licenses "$OUT/"
 echo "Windows build in $OUT"

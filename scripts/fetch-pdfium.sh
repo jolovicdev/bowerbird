@@ -9,14 +9,17 @@ BUILD=7881
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # `fetch-pdfium.sh android`: the library for 64-bit ARM phones, placed where
-# the Android build packs it beside the app's own native library.
+# the Android build packs it beside the app's own native library, and its
+# licenses among the app's assets.
 if [ "${1:-}" = android ]; then
   JNI="$ROOT/crates/desktop/gen/android/app/src/main/jniLibs/arm64-v8a"
+  NOTICES="$ROOT/crates/desktop/gen/android/app/src/main/assets/notices/pdfium"
   TMP="$(mktemp -d)"
   curl -fsSL "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${BUILD}/pdfium-android-arm64.tgz" \
     | tar xz -C "$TMP"
-  mkdir -p "$JNI"
+  mkdir -p "$JNI" "$NOTICES"
   cp "$TMP/lib/libpdfium.so" "$JNI/"
+  cp -r "$TMP/LICENSE" "$TMP/licenses" "$NOTICES/"
   rm -rf "$TMP"
   echo "PDFium ${BUILD} (android-arm64) installed in ${JNI}"
   exit 0

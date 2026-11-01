@@ -4,6 +4,7 @@ version = "0.1.1"
 authors = ["jolovicdev"]
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 [lib]
 name = "bowerbird_desktop_lib"

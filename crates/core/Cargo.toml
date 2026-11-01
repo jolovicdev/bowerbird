@@ -3,6 +3,7 @@ name = "bowerbird-core"
 version = "0.1.1"
 edition = "2024"
 license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 dom_smoothie = "0.18"

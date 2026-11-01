@@ -7,8 +7,10 @@ issue so we can agree on the approach first.
 
 [README.md](README.md#build-and-run) covers building the web app, the
 desktop apps and the Android app, and [ARCHITECTURE.md](ARCHITECTURE.md)
-explains how the code fits together. A pull request runs the checks below.
-They need the PDFium library and the built UI:
+explains how the code fits together. `rust-toolchain.toml` names the Rust
+version that CI and the releases build with; rustup installs it on first
+use. A pull request runs the checks below. They need the PDFium library and
+the built UI:
 
 ```sh
 scripts/fetch-pdfium.sh

@@ -10,16 +10,34 @@ use std::time::Duration;
 use loqui_g2p::OovFallback;
 use loqui_kokoro::{Blend, Device, Kokoro, KokoroModel};
 use opus_pure::{Application, MAX_PACKET_BYTES, OggOpusWriter, OpusEncoder, OpusHead};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 pub const SAMPLE_RATE: u32 = loqui_kokoro::SAMPLE_RATE;
 /// The two hosts' voices.
 pub const HOSTS: [&str; 2] = ["af_heart", "am_michael"];
-const REPOSITORY: &str = "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main";
+/// A fixed revision, so a change upstream can't swap the model.
+const REPOSITORY: &str = "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231";
 /// The half-precision export: on CPUs it speaks as fast as the full model
 /// at half the download (163 MB), and about four times faster than the
 /// smaller 8-bit one.
 const MODEL: &str = "onnx/model_fp16.onnx";
+/// What a recording needs, the model and the HOSTS' voices, as paths inside
+/// the model repository with the SHA-256 of each.
+const VOICE_FILES: [(&str, &str); 3] = [
+    (
+        MODEL,
+        "ba4527a874b42b21e35f468c10d326fdff3c7fc8cac1f85e9eb6c0dfc35c334a",
+    ),
+    (
+        "voices/af_heart.bin",
+        "d583ccff3cdca2f7fae535cb998ac07e9fcb90f09737b9a41fa2734ec44a8f0b",
+    ),
+    (
+        "voices/am_michael.bin",
+        "1d1f21dd8da39c30705cd4c75d039d265e9bc4a2a93ed09bc9e1b1225eb95ba1",
+    ),
+];
 const BITRATE: i32 = 32_000;
 
 #[derive(Debug, thiserror::Error)]
@@ -40,22 +58,15 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// What a recording needs, as paths inside the model repository.
-fn voice_files() -> Vec<String> {
-    std::iter::once(MODEL.to_string())
-        .chain(HOSTS.iter().map(|voice| format!("voices/{voice}.bin")))
-        .collect()
-}
-
 /// Whether the voice model and voices are already in `dir`.
 pub fn voices_ready(dir: &Path) -> bool {
-    voice_files().iter().all(|file| dir.join(file).is_file())
+    VOICE_FILES.iter().all(|(file, _)| dir.join(file).is_file())
 }
 
 /// Downloads what reading aloud needs into `dir`. `progress` gets the bytes
 /// done and the total of the file being downloaded, as they arrive.
 pub async fn download_voices(dir: &Path, progress: impl Fn(u64, u64)) -> Result<()> {
-    fetch(dir, REPOSITORY, &voice_files(), progress).await
+    fetch(dir, REPOSITORY, &VOICE_FILES, progress).await
 }
 
 /// Whether the transcription model is already in `dir`.
@@ -68,16 +79,19 @@ pub async fn download_transcriber(dir: &Path, progress: impl Fn(u64, u64)) -> Re
     fetch(
         dir,
         listen::REPOSITORY,
-        &[listen::MODEL.to_string()],
+        &[(listen::MODEL, listen::MODEL_SHA256)],
         progress,
     )
     .await
 }
 
+/// Downloads each of `files`, a path in `repository` with the SHA-256 its
+/// bytes must have, skipping those already in `dir`. A download with other
+/// bytes is discarded.
 async fn fetch(
     dir: &Path,
     repository: &str,
-    files: &[String],
+    files: &[(&str, &str)],
     progress: impl Fn(u64, u64),
 ) -> Result<()> {
     let http = reqwest::Client::builder()
@@ -85,7 +99,7 @@ async fn fetch(
         .read_timeout(Duration::from_secs(60))
         .build()
         .map_err(|e| Error::Download(e.to_string()))?;
-    for file in files {
+    for &(file, sha256) in files {
         let path = dir.join(file);
         if path.is_file() {
             continue;
@@ -105,9 +119,11 @@ async fn fetch(
         // interrupted download is never mistaken for a finished one.
         let part = PathBuf::from(format!("{}.part", path.display()));
         let mut out = tokio::fs::File::create(&part).await?;
+        let mut hash = Sha256::new();
         let mut done = 0;
         while let Some(chunk) = response.chunk().await.map_err(failed)? {
             out.write_all(&chunk).await?;
+            hash.update(&chunk);
             done += chunk.len() as u64;
             progress(done, total);
         }
@@ -115,6 +131,12 @@ async fn fetch(
         if total > 0 && done != total {
             return Err(Error::Download(format!(
                 "The download of {file} stopped at {done} of {total} bytes. Try again."
+            )));
+        }
+        if format!("{:x}", hash.finalize()) != sha256 {
+            tokio::fs::remove_file(&part).await?;
+            return Err(Error::Download(format!(
+                "{file} arrived different from the file Bowerbird expects, so it was discarded. Try again."
             )));
         }
         tokio::fs::rename(&part, &path).await?;
@@ -192,6 +214,43 @@ mod tests {
         }
         // 75 whole 20 ms packets and a padded one for the last 10 ms.
         assert_eq!(packets, 76);
+    }
+
+    #[tokio::test]
+    async fn a_model_file_is_kept_only_with_the_expected_bytes() {
+        use tokio::io::AsyncReadExt;
+        let body = "af_heart voice";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let repository = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            while let Ok((mut conn, _)) = listener.accept().await {
+                let mut request = [0; 2048];
+                let _ = conn.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = conn.write_all(response.as_bytes()).await;
+            }
+        });
+        let dir = std::env::temp_dir().join(format!("bowerbird-fetch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let expected = format!("{:x}", Sha256::digest(body));
+        fetch(&dir, &repository, &[("voices/a.bin", &expected)], |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("voices/a.bin")).unwrap(),
+            body
+        );
+        let other = "0".repeat(64);
+        assert!(
+            fetch(&dir, &repository, &[("voices/b.bin", &other)], |_, _| {})
+                .await
+                .is_err()
+        );
+        assert!(!dir.join("voices/b.bin").exists());
+        assert!(!dir.join("voices/b.bin.part").exists());
     }
 
     /// Everything `listen::decode` hands on, joined.

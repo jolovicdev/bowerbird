@@ -15,7 +15,21 @@ const RELEASE: &str = "https://github.com/GreatV/oar-ocr/releases/download/v0.3.
 const DETECTOR: &str = "pp-ocrv5_mobile_det.onnx";
 const RECOGNIZER: &str = "latin_pp-ocrv5_mobile_rec.onnx";
 const DICTIONARY: &str = "ppocrv5_latin_dict.txt";
-const FILES: [&str; 3] = [DETECTOR, RECOGNIZER, DICTIONARY];
+/// Each file with its SHA-256.
+const FILES: [(&str, &str); 3] = [
+    (
+        DETECTOR,
+        "1eb7b4f7ab657ebd1c66d5f79bca7497f29768a2e3c15e52daecbba1a8e4a039",
+    ),
+    (
+        RECOGNIZER,
+        "e3a6bfeea1c8a01d6fccfd480a0bd363fd907f8c65931e228bb2736f5c3e142f",
+    ),
+    (
+        DICTIONARY,
+        "ccbcc45730b3fbbd9050c5bc74db6a99067141ef1035e3d14889a84a6b9b1aff",
+    ),
+];
 
 pub fn dir() -> PathBuf {
     settings::models_dir().join("ocr")
@@ -23,7 +37,7 @@ pub fn dir() -> PathBuf {
 
 /// Whether the models are already in `dir`.
 pub fn ready(dir: &Path) -> bool {
-    FILES.iter().all(|file| dir.join(file).is_file())
+    FILES.iter().all(|(file, _)| dir.join(file).is_file())
 }
 
 /// Downloads the models into `dir`, reporting as `download::files`.

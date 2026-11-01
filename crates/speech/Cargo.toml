@@ -11,9 +11,10 @@ loqui-whisper = "0.4"
 opus-pure = "0.2.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 rubato = "5.0.1"
+sha2 = "0.10"
 symphonia = { version = "0.6.1", default-features = false, features = ["aac", "flac", "isomp4", "mkv", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 thiserror = "2"
 tokio = { version = "1.54", features = ["fs", "io-util"] }
 
 [dev-dependencies]
-tokio = { version = "1.54", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net"] }

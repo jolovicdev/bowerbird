@@ -23,6 +23,33 @@ const TOKENIZER: [&str; 4] = [
     "special_tokens_map.json",
     "tokenizer_config.json",
 ];
+/// Every file the model needs, with its SHA-256.
+const FILES: [(&str, &str); 6] = [
+    (
+        MODEL,
+        "ad1dfee81a70f7944b9b9d1cc6e48075b832881cf33fab2f2b248be78f3f0043",
+    ),
+    (
+        WEIGHTS,
+        "599962c3143b040de2dd05e5975be3e9091dd067cacc6a8f7186e3203bab9e02",
+    ),
+    (
+        TOKENIZER[0],
+        "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47",
+    ),
+    (
+        TOKENIZER[1],
+        "6e1f06404b7163e0325ed2ea3e6781cde50f4a50b31780a95ad0d30e8404d77b",
+    ),
+    (
+        TOKENIZER[2],
+        "2f7b0adf4fb469770bb1490e3e35df87b1dc578246c5e7e6fc76ecf33213a397",
+    ),
+    (
+        TOKENIZER[3],
+        "3ca953eea6c3c9fcda9cf3df22949ff18b216f7c74bd6459230f3f1013953f3a",
+    ),
+];
 /// Chunks embedded per call. Small, so a question waiting for the model
 /// isn't held up long by a fill in progress.
 pub const BATCH: usize = 8;
@@ -33,18 +60,14 @@ pub fn dir() -> PathBuf {
     settings::models_dir().join("embeddinggemma")
 }
 
-fn files() -> impl Iterator<Item = &'static str> {
-    [MODEL, WEIGHTS].into_iter().chain(TOKENIZER)
-}
-
 /// Whether the model is already in `dir`.
 pub fn ready(dir: &Path) -> bool {
-    files().all(|file| dir.join(file).is_file())
+    FILES.iter().all(|(file, _)| dir.join(file).is_file())
 }
 
 /// Downloads the model into `dir`, reporting as `download::files`.
 pub async fn download(dir: &Path, progress: impl Fn(u64, u64)) -> Result<()> {
-    download::files(dir, REPOSITORY, &files().collect::<Vec<_>>(), progress).await
+    download::files(dir, REPOSITORY, &FILES, progress).await
 }
 
 pub struct Embedder(Mutex<TextEmbedding>);

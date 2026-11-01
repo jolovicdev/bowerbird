@@ -20,9 +20,13 @@ use symphonia::core::meta::MetadataOptions;
 use crate::{Error, Result};
 
 pub const WHISPER_RATE: u32 = 16_000;
-pub(crate) const REPOSITORY: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+/// A fixed revision, so a change upstream can't swap the model.
+pub(crate) const REPOSITORY: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1";
 /// Whisper small, multilingual, at 5 bits: 190 MB.
 pub(crate) const MODEL: &str = "ggml-small-q5_1.bin";
+pub(crate) const MODEL_SHA256: &str =
+    "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb";
 /// A chunk can cut a word in two where it ends; splitting at a pause would
 /// avoid that if it shows in transcripts.
 const CHUNK_SECONDS: usize = 300;

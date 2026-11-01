@@ -581,6 +581,7 @@ dependencies = [
  "opus-pure",
  "reqwest",
  "rubato",
+ "sha2",
  "symphonia",
  "thiserror 2.0.21",
  "tokio",

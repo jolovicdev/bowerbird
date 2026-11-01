@@ -263,17 +263,30 @@ pub fn figure_sources(page: &Page, url: &str) -> Vec<String> {
 /// address, file extension and bytes. A picture that fails, isn't a format
 /// browsers show, or is too large is left out; the page is worth adding
 /// without it. The page chose these addresses, so only the public internet
-/// is reached.
-pub async fn fetch_images(srcs: &[String]) -> Vec<(String, &'static str, Vec<u8>)> {
-    let Ok(client) = client(Reach::Public).build() else {
+/// is reached, except on the page's own host when `reach`, the page's own
+/// limit, allowed it to be anywhere, as for a page on this machine.
+pub async fn fetch_images(
+    srcs: &[String],
+    page_url: &str,
+    reach: Reach,
+) -> Vec<(String, &'static str, Vec<u8>)> {
+    let (Ok(public), Ok(any)) = (client(Reach::Public).build(), client(Reach::Any).build()) else {
         return Vec::new();
     };
+    let page_host = reqwest::Url::parse(page_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string));
     let deadline = tokio::time::Instant::now() + IMAGES_TIME;
     futures::stream::iter(srcs.iter().take(IMAGES_MAX).cloned())
         .map(|src| {
-            let client = client.clone();
+            let same_host = page_host.is_some()
+                && reqwest::Url::parse(&src)
+                    .ok()
+                    .is_some_and(|u| u.host_str() == page_host.as_deref());
+            let reach = if same_host { reach } else { Reach::Public };
+            let client = if reach == Reach::Any { &any } else { &public }.clone();
             let fetch = async move {
-                if !host_allowed(&src, Reach::Public) {
+                if !host_allowed(&src, reach) {
                     return None;
                 }
                 let response = client
@@ -849,7 +862,7 @@ mod tests {
 
     /// A server on a free loopback port answering every request with `body`,
     /// without a length, so the body ends when the connection closes.
-    async fn serve(body: Vec<u8>) -> u16 {
+    async fn serve(content_type: &'static str, body: Vec<u8>) -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -858,8 +871,9 @@ mod tests {
                 tokio::spawn(async move {
                     let mut request = [0; 4096];
                     let _ = stream.read(&mut request).await;
-                    let head =
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n";
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n"
+                    );
                     let _ = stream.write_all(head.as_bytes()).await;
                     let _ = stream.write_all(&body).await;
                 });
@@ -899,7 +913,7 @@ mod tests {
 
     #[tokio::test]
     async fn links_off_the_internet_are_fetched_only_when_any_address_may_be() {
-        let port = serve(b"<html><title>Local</title></html>".to_vec()).await;
+        let port = serve("text/html", b"<html><title>Local</title></html>".to_vec()).await;
         for url in [
             format!("http://127.0.0.1:{port}/"),
             format!("http://localhost:{port}/"),
@@ -917,8 +931,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pictures_off_the_internet_come_only_from_a_local_page_s_own_host() {
+        let port = serve("image/png", b"not really a png".to_vec()).await;
+        let src = vec![format!("http://127.0.0.1:{port}/plate.png")];
+        let page = format!("http://127.0.0.1:{port}/bowers.html");
+        assert_eq!(fetch_images(&src, &page, Reach::Any).await.len(), 1);
+        assert!(fetch_images(&src, &page, Reach::Public).await.is_empty());
+        let elsewhere = format!("http://localhost:{port}/bowers.html");
+        assert!(fetch_images(&src, &elsewhere, Reach::Any).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn bodies_stop_at_their_limit() {
-        let port = serve(vec![b'x'; 5000]).await;
+        let port = serve("text/html", vec![b'x'; 5000]).await;
         let url = format!("http://127.0.0.1:{port}/");
         let over = body(reqwest::get(&url).await.unwrap(), 4096).await.unwrap();
         assert!(over.is_none());

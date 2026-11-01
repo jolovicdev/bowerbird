@@ -85,7 +85,8 @@ are capped at 200 MB. The server listens on `127.0.0.1` unless `--addr` says
 otherwise; when it listens beyond this machine, links added through the API
 may only reach the public internet (`web::Reach::Public`), so a token holder
 can't make the server read its own machine or local network. Addresses a web
-page chooses, such as its pictures, are held to the public internet always.
+page chooses, such as its pictures, are held to the public internet, except
+on the page's own host when the page itself was allowed off it.
 
 Work that changes a notebook takes that notebook's lock, so two requests never
 rewrite `notebook.toml` or index the same source at once. Speech and OCR

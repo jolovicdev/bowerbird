@@ -135,14 +135,14 @@ pub(crate) async fn add_url(
         // the only time its figures are read.
         let (page, images) = match page {
             Some(page) => {
-                let url = url.clone();
+                let page_url = url.clone();
                 let (page, srcs) = tokio::task::spawn_blocking(move || {
-                    let srcs = web::figure_sources(&page, &url);
+                    let srcs = web::figure_sources(&page, &page_url);
                     (page, srcs)
                 })
                 .await
                 .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-                let images = web::fetch_images(&srcs).await;
+                let images = web::fetch_images(&srcs, &url, state.reach).await;
                 (Some(page), images)
             }
             None => (None, Vec::new()),

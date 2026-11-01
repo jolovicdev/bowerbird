@@ -47,7 +47,9 @@ jobs:
 
   # Apple Silicon only. Signed ad hoc, not notarized: macOS blocks the first
   # launch until it is allowed under System Settings, Privacy & Security.
+  # Left out of the weekly run: macOS minutes cost ten times as much.
   macos:
+    if: github.event_name != 'schedule'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -11,7 +11,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Downloads PDFium for platform $1 and unpacks it into $2, once the archive
 # matches the SHA-256 recorded here for this build.
 fetch() {
-  local sha256 archive sum
+  local sha256 archive sum actual
   case "$1" in
     android-arm64) sha256=16d23bb86c4188d59326dc509938f59df3c417ecfdd3d2ca2f160dc5bd49a839 ;;
     linux-x64) sha256=1470e21b8b4a3b4ad7f85684e2da11d94f3b69a86d81dee11b9b6709d927ac1d ;;
@@ -22,10 +22,12 @@ fetch() {
   archive="$(mktemp)"
   curl -fsSL -o "$archive" \
     "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${BUILD}/pdfium-$1.tgz"
-  # macOS has shasum but not always sha256sum; both check "hash  file" lines.
+  # Older macOS has only shasum, and the sha256sum newer macOS ships takes no
+  # long options; every one of them prints the hash first.
   if command -v sha256sum > /dev/null; then sum=(sha256sum); else sum=(shasum -a 256); fi
-  echo "$sha256  $archive" | "${sum[@]}" --status -c || {
-    echo "pdfium-$1.tgz doesn't match its recorded SHA-256" >&2
+  actual="$("${sum[@]}" "$archive" | cut -d' ' -f1)"
+  [ "$actual" = "$sha256" ] || {
+    echo "pdfium-$1.tgz has SHA-256 $actual, not the recorded $sha256" >&2
     exit 1
   }
   tar xzf "$archive" -C "$2"

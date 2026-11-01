@@ -1253,12 +1253,12 @@ prosemirror-commands 1.7.2 (MIT)
 prosemirror-history 1.5.1 (MIT)
 prosemirror-inputrules 1.5.1 (MIT)
 prosemirror-keymap 1.2.3 (MIT)
-prosemirror-markdown 1.13.8 (MIT)
+prosemirror-markdown 1.13.9 (MIT)
 prosemirror-model 1.25.12 (MIT)
 prosemirror-schema-list 1.5.1 (MIT)
 prosemirror-state 1.4.4 (MIT)
 prosemirror-transform 1.12.2 (MIT)
-prosemirror-view 1.42.6 (MIT)
+prosemirror-view 1.42.8 (MIT)
 ------------------------------------------------------------------------------
 Copyright (C) 2015-2017 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
 
@@ -1329,7 +1329,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
 ==============================================================================
-svelte 5.57.2 (MIT)
+svelte 5.57.3 (MIT)
 ------------------------------------------------------------------------------
 Copyright (c) 2016-2025 [Svelte Contributors](https://github.com/sveltejs/svelte/graphs/contributors)
 

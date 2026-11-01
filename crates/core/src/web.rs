@@ -21,8 +21,8 @@ pub enum Reach {
     /// Anywhere, this machine and its local network included.
     Any,
     /// The public internet only. For addresses a page chooses, and for links
-    /// added while the server is open to other machines, so neither reaches
-    /// what only the server can, such as a cloud metadata service.
+    /// added through a server that doesn't allow private links, so neither
+    /// reaches what only the server can, such as a cloud metadata service.
     Public,
 }
 
@@ -236,7 +236,7 @@ impl std::error::Error for PrivateAddress {}
 
 fn private_message(host: &str) -> String {
     format!(
-        "{host} is on this machine or a private network, which links can't reach while Bowerbird is open to other machines."
+        "{host} is on this machine or a private network, which links can't reach unless the server runs with --allow-private-links."
     )
 }
 

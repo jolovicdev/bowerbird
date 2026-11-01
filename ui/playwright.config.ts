@@ -18,7 +18,8 @@ export default defineConfig({
 	workers: 1,
 	use: { baseURL: `http://${host}:${port}` },
 	webServer: {
-		command: `../target/debug/bowerbird-server --addr ${host}:${port} --ui build --library ${library}`,
+		// The pictures test serves its web page from this machine.
+		command: `../target/debug/bowerbird-server --addr ${host}:${port} --ui build --library ${library} --allow-private-links`,
 		url: `http://${host}:${port}/`,
 		env: { ...process.env, BOWERBIRD_TOKEN: 'e2e' } as Record<string, string>,
 		reuseExistingServer: false

@@ -82,9 +82,12 @@ as Office Open XML by hand (`pptx`).
 
 Every `/api` request needs the bearer token printed at startup. Request bodies
 are capped at 200 MB. The server listens on `127.0.0.1` unless `--addr` says
-otherwise; when it listens beyond this machine, links added through the API
-may only reach the public internet (`web::Reach::Public`), so a token holder
-can't make the server read its own machine or local network. Addresses a web
+otherwise. Links added through the API may only reach the public internet
+(`web::Reach::Public`) unless the server runs with `--allow-private-links`, so
+a token holder can't make the server read its own machine or local network.
+The listening address can't decide this, since behind a reverse proxy every
+request arrives from loopback. The desktop app allows private links: only its
+own window holds the token. Addresses a web
 page chooses, such as its pictures, are held to the public internet, except
 on the page's own host when the page itself was allowed off it.
 

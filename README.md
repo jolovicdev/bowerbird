@@ -143,8 +143,10 @@ cargo run --release -p bowerbird-server
 The server prints a link with an access token. Open it in a browser. It
 listens on `127.0.0.1:7477`; `--addr` changes that, and anything other than
 a loopback address exposes your notebooks to the network, protected only by
-the token. In that mode, links added through the app may only point at the
-public internet, not at the server's own machine or its local network.
+the token. Links added through the server may only point at the public
+internet, not at the server's own machine or its local network, unless it runs
+with `--allow-private-links`. Leave that off when anyone else can reach the
+server, directly or through a reverse proxy. The desktop app allows such links.
 
 ### Command line
 

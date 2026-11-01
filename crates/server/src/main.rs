@@ -18,6 +18,9 @@ struct Args {
     /// Notebook library folder. Defaults to $BOWERBIRD_HOME, else ~/Bowerbird.
     #[arg(long)]
     library: Option<PathBuf>,
+    /// Let added links point at this machine or its local network. Leave it off when anyone else can reach the server, directly or through a reverse proxy.
+    #[arg(long)]
+    allow_private_links: bool,
 }
 
 /// Fixed token instead of a fresh one per start, e.g. for tests.
@@ -44,7 +47,7 @@ async fn main() -> std::io::Result<()> {
         ui_dir,
         settings_path,
         settings,
-        local_only: args.addr.ip().is_loopback(),
+        private_links: args.allow_private_links,
     });
     let listener = tokio::net::TcpListener::bind(args.addr).await?;
     if !args.addr.ip().is_loopback() {

@@ -47,9 +47,10 @@ pub struct Config {
     /// Where Settings saves, and what it holds at startup.
     pub settings_path: PathBuf,
     pub settings: Settings,
-    /// The server listens on a loopback address, so only this machine reaches
-    /// it. Only then may an added link point at this machine or its network.
-    pub local_only: bool,
+    /// Whether a link added through the API may point at this machine or its
+    /// local network. The listening address can't decide this: behind a
+    /// reverse proxy every request arrives from loopback.
+    pub private_links: bool,
 }
 
 /// Largest request body any API route takes: one uploaded file with its form
@@ -99,7 +100,7 @@ pub fn router(config: Config) -> Router {
         jobs: Arc::default(),
         speech: Arc::default(),
         embedding: Arc::default(),
-        reach: if config.local_only {
+        reach: if config.private_links {
             web::Reach::Any
         } else {
             web::Reach::Public
@@ -414,6 +415,10 @@ mod tests {
 
     /// A server on a free port with an empty library and settings file.
     async fn serve(name: &str) -> std::net::SocketAddr {
+        serve_with(name, true).await
+    }
+
+    async fn serve_with(name: &str, private_links: bool) -> std::net::SocketAddr {
         let dir = std::env::temp_dir().join(format!("bowerbird-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let app = router(Config {
@@ -422,7 +427,7 @@ mod tests {
             ui_dir: None,
             settings_path: dir.join("settings.toml"),
             settings: Settings::default(),
-            local_only: true,
+            private_links,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -646,6 +651,19 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         panic!("the link was never added");
+    }
+
+    #[tokio::test]
+    async fn links_reach_this_machine_only_when_private_links_are_allowed() {
+        let addr = serve_with("public-only", false).await;
+        let t = Some("right-token");
+        call(addr, "POST", "/api/notebooks", t, r#"{"title":"History"}"#).await;
+        let body = r#"{"url":"http://127.0.0.1:9/westphalia.html"}"#;
+        let added = call(addr, "POST", "/api/notebooks/history/sources/url", t, body).await;
+        assert!(
+            added.starts_with("HTTP/1.1 502") && added.contains("--allow-private-links"),
+            "{added}"
+        );
     }
 
     #[tokio::test]

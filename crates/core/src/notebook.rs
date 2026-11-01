@@ -203,6 +203,27 @@ fn plain_file_name(name: &str) -> bool {
     ) && !name.contains(['/', '\\', ':'])
 }
 
+/// Fails on a symbolic link anywhere under `dir`, naming it relative to
+/// `root`. Entries are listed without following links, so a link to a folder
+/// is caught rather than entered.
+fn refuse_links(root: &Path, dir: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            let path = entry.path();
+            return Err(Error::Invalid(format!(
+                "“{}” in this notebook is a link to somewhere else, so the notebook won't open.",
+                path.strip_prefix(root).unwrap_or(&path).display()
+            )));
+        }
+        if kind.is_dir() {
+            refuse_links(root, &entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 fn unix_secs(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
@@ -224,8 +245,11 @@ fn split_note(raw: &str) -> (String, String) {
 impl Notebook {
     /// A notebook folder may come from someone else, so every path its
     /// notebook.toml names must stay inside the folder: source files are read
-    /// and deleted through them.
+    /// and deleted through them. A symbolic link in the folder could point
+    /// anywhere, and files are read and written through it, so a notebook
+    /// holding one isn't opened, checked before notebook.toml is even read.
     pub fn open(dir: &Path) -> Result<Notebook> {
+        refuse_links(dir, dir)?;
         let raw = std::fs::read_to_string(dir.join("notebook.toml"))?;
         let file: NotebookFile = toml::from_str(&raw).map_err(|e| Error::Toml(e.to_string()))?;
         if let Some(bad) = file
@@ -249,6 +273,9 @@ impl Notebook {
     pub fn open_or_create(dir: &Path, title: &str) -> Result<Notebook> {
         if dir.join("notebook.toml").exists() {
             return Notebook::open(dir);
+        }
+        if dir.is_dir() {
+            refuse_links(dir, dir)?;
         }
         for sub in ["sources", "notes", "chats", ".bowerbird"] {
             std::fs::create_dir_all(dir.join(sub))?;
@@ -886,6 +913,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(Notebook::open(&nb.dir).unwrap().sources.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn notebooks_holding_links_do_not_open() {
+        use std::os::unix::fs::symlink;
+        let tmp = std::env::temp_dir().join(format!("bowerbird-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let elsewhere = tmp.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let secret = elsewhere.join("secret.txt");
+        std::fs::write(&secret, "Not part of any notebook.").unwrap();
+        let fresh = |name: &str| {
+            let mut nb = Notebook::open_or_create(&tmp.join(name), "Birds").unwrap();
+            let source = nb
+                .add_text("Bowers", "The male gathers blue finds.")
+                .unwrap();
+            (nb, source)
+        };
+        let refusal = |nb: &Notebook| Notebook::open(&nb.dir).err().map(|e| e.to_string());
+
+        let (nb, source) = fresh("source");
+        std::fs::remove_file(nb.source_path(&source)).unwrap();
+        symlink(&secret, nb.source_path(&source)).unwrap();
+        assert!(refusal(&nb).is_some_and(|e| e.contains(&source.file)));
+
+        let (nb, _) = fresh("note");
+        symlink(&secret, nb.dir.join("notes").join("n1.md.tmp")).unwrap();
+        assert!(refusal(&nb).is_some_and(|e| e.contains("n1.md.tmp")));
+
+        let (nb, _) = fresh("folder");
+        std::fs::remove_dir_all(nb.dir.join("chats")).unwrap();
+        symlink(&elsewhere, nb.dir.join("chats")).unwrap();
+        assert!(refusal(&nb).is_some_and(|e| e.contains("chats")));
+
+        let unfinished = tmp.join("unfinished");
+        std::fs::create_dir_all(&unfinished).unwrap();
+        symlink(&secret, unfinished.join("notebook.toml.tmp")).unwrap();
+        assert!(Notebook::open_or_create(&unfinished, "Birds").is_err());
+        assert_eq!(
+            std::fs::read_to_string(&secret).unwrap(),
+            "Not part of any notebook."
+        );
     }
 
     #[test]

@@ -5,6 +5,11 @@
 const MAX_MARKUP: usize = 600;
 /// Shorter quotes match too easily to prove anything.
 const MIN_QUOTE_CHARS: usize = 8;
+/// Shortest piece of a quote with an ellipsis, in letters and digits. Shorter
+/// pieces can be strung together from scattered words of a long passage.
+const MIN_PIECE_CHARS: usize = 10;
+/// Most letters and digits an ellipsis may stand for: about two sentences.
+const MAX_ELISION: usize = 300;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Piece {
@@ -129,7 +134,7 @@ pub fn normalize(s: &str) -> String {
 }
 
 /// True when every part of `quote` (split on ellipses) appears in `passage`,
-/// in order.
+/// in order, each part close after the one before it.
 pub fn verify(quote: &str, passage: &str) -> bool {
     let passage = normalize(passage);
     let parts: Vec<String> = quote
@@ -143,14 +148,23 @@ pub fn verify(quote: &str, passage: &str) -> bool {
     if parts.is_empty() || total < MIN_QUOTE_CHARS {
         return false;
     }
-    let mut from = 0;
-    for part in &parts {
-        match passage[from..].find(part.as_str()) {
-            Some(at) => from += at + part.len(),
-            None => return false,
-        }
+    if parts.len() > 1 && parts.iter().any(|p| p.chars().count() < MIN_PIECE_CHARS) {
+        return false;
     }
-    true
+    in_order(&passage, &parts, 0, false)
+}
+
+/// Finds `parts` in `passage` from byte `from` on. After the first part, each
+/// must start within MAX_ELISION of the previous one's end. Every place a part
+/// appears is tried, since its first appearance may be too far from the next.
+fn in_order(passage: &str, parts: &[String], from: usize, elided: bool) -> bool {
+    let Some((part, rest)) = parts.split_first() else {
+        return true;
+    };
+    let tail = &passage[from..];
+    tail.match_indices(part.as_str())
+        .take_while(|&(at, _)| !elided || tail[..at].chars().count() <= MAX_ELISION)
+        .any(|(at, _)| in_order(passage, rest, from + at + part.len(), true))
 }
 
 #[cfg(test)]
@@ -172,6 +186,29 @@ mod tests {
         assert!(!verify("threshold was raised to 3 percent", PASSAGE));
         assert!(!verify("for all filers ... threshold was lowered", PASSAGE));
         assert!(!verify("the", PASSAGE));
+    }
+
+    #[test]
+    fn verify_rejects_quotes_stitched_from_scattered_pieces() {
+        assert!(!verify("The threshold … to 3 … fiscal", PASSAGE));
+        let far = format!(
+            "The council met in spring. {}The tax was abolished.",
+            "Nothing else happened that year. ".repeat(12)
+        );
+        assert!(verify("The council met in spring", &far));
+        assert!(!verify(
+            "The council met in spring … The tax was abolished",
+            &far
+        ));
+    }
+
+    #[test]
+    fn verify_tries_every_place_the_first_piece_appears() {
+        let passage = format!(
+            "The levy was raised. {}The levy was raised again, and the towns paid it.",
+            "Wars came and went. ".repeat(20)
+        );
+        assert!(verify("The levy was raised … the towns paid it", &passage));
     }
 
     #[test]

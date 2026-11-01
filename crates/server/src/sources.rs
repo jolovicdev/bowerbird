@@ -129,7 +129,7 @@ pub(crate) async fn add_url(
         let page = if known {
             None
         } else {
-            Some(web::fetch(&url).await?)
+            Some(web::fetch(&url, state.reach).await?)
         };
         // The page's pictures are saved before its first index sync, which is
         // the only time its figures are read.

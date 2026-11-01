@@ -75,7 +75,7 @@ pub fn guide_system() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Citation {
     /// Passage the citation resolved to. Differs from what the model wrote
-    /// when the quote was found in another passage.
+    /// when the quote was found in another passage of the same source.
     pub label: String,
     pub letter: String,
     pub source_id: Option<String>,
@@ -349,17 +349,18 @@ fn emit(
 }
 
 /// Checks the quote against the cited passage first, then the same source's
-/// other passages, then every passage.
+/// other passages, since a quote can run across a passage boundary. A quote
+/// found only in another source stays unverified: the answer attributed it to
+/// the wrong source.
 pub fn resolve(label: &str, quote: String, passages: &[Passage]) -> Citation {
     let letter = cite::split_label(label).map_or("", |(l, _)| l).to_string();
     let cited = passages.iter().find(|p| p.label == label);
     let same_source = passages
         .iter()
-        .filter(|p| cited.is_some_and(|c| c.source_id == p.source_id));
+        .filter(|p| cite::split_label(&p.label).is_some_and(|(l, _)| l == letter));
     let found = cited
         .into_iter()
         .chain(same_source)
-        .chain(passages.iter())
         .find(|p| cite::verify(&quote, &p.text));
     match found {
         Some(p) => Citation {
@@ -530,15 +531,22 @@ mod tests {
     }
 
     #[test]
-    fn resolve_moves_a_misattributed_quote_to_the_passage_that_has_it() {
+    fn resolve_looks_for_a_quote_only_in_the_cited_source() {
         let passages = vec![
             passage("A1", "a", "Satin bowerbirds prefer blue objects."),
             passage("A2", "a", "Females inspect the bower before mating."),
             passage("B0", "b", "The Vogelkop bowerbird sorts finds by color."),
         ];
-        let c = resolve("A1", "sorts finds by color".into(), &passages);
+        let c = resolve("A1", "inspect the bower before mating".into(), &passages);
         assert!(c.verified);
-        assert_eq!((c.label.as_str(), c.letter.as_str()), ("B0", "B"));
+        assert_eq!(c.label, "A2");
+        let c = resolve("A7", "inspect the bower before mating".into(), &passages);
+        assert!(c.verified);
+        assert_eq!(c.label, "A2");
+
+        let c = resolve("A1", "sorts finds by color".into(), &passages);
+        assert!(!c.verified);
+        assert_eq!((c.label.as_str(), c.letter.as_str()), ("A1", "A"));
 
         let c = resolve("A1", "males paint the bower with berries".into(), &passages);
         assert!(!c.verified);

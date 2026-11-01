@@ -45,6 +45,7 @@ pub fn run() {
                 ui_dir: ui.join(bowerbird_server::UI_SHELL).exists().then_some(ui),
                 settings_path,
                 settings,
+                local_only: true,
             });
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, PORT))
                 .or_else(|_| TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))?;

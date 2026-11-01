@@ -62,12 +62,12 @@ words highlighted, or, for a PDF, the printed page, and judge for yourself.
 
 ## Download
 
-Builds for Linux (`.deb`, AppImage), macOS (Apple Silicon `.dmg`), Windows
-(portable `.zip`) and Android (64-bit ARM `.apk`) are attached to each
-[release](https://github.com/jolovicdev/bowerbird/releases). The macOS app is
-signed ad hoc, not notarized, so macOS blocks its first launch: allow it
-under System Settings, Privacy & Security, Open Anyway. To build from
-source, see [Build and run](#build-and-run).
+Builds for Linux (`.deb`, AppImage), macOS 13.4 or later (Apple Silicon
+`.dmg`), Windows (portable `.zip`) and Android (64-bit ARM `.apk`) are
+attached to each [release](https://github.com/jolovicdev/bowerbird/releases).
+The macOS app is signed ad hoc, not notarized, so macOS blocks its first
+launch: allow it under System Settings, Privacy & Security, Open Anyway. To
+build from source, see [Build and run](#build-and-run).
 
 ## How it works
 

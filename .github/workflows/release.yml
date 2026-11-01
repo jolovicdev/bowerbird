@@ -47,6 +47,10 @@ jobs:
 
   # Apple Silicon only. Signed ad hoc, not notarized: macOS blocks the first
   # launch until it is allowed under System Settings, Privacy & Security.
+  # tauri.conf.json turns the hardened runtime off: under it the app loads only
+  # libraries signed with its own team ID, which an ad-hoc signature lacks, so
+  # PDFium would not load. It requires macOS 13.4, the oldest that ONNX
+  # Runtime's prebuilt library supports.
   # Left out of the weekly run: macOS minutes cost ten times as much.
   macos:
     if: github.event_name != 'schedule'

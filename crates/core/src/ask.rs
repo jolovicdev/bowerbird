@@ -22,7 +22,7 @@ use crate::{Error, Result};
 pub const DEFAULT_MODEL: &str = "deepseek-flash";
 const MAX_DEEP_SECTIONS: usize = 6;
 
-pub(crate) const CITE_RULES: &str = "Cite every sentence that states something from the passages with one or more markers in the form [[A3|exact words]]. A3 is the passage label. Exact words is a quote of 3 to 15 words copied character for character from that passage.
+pub(crate) const CITE_RULES: &str = "Cite every sentence that states something from the passages with one or more markers in the form [[A3|exact words]]. A3 is the passage label. Exact words is a quote of 3 to 15 words (at least 8 characters in Chinese or Japanese) copied character for character from that passage.
 Put markers right after the sentence they support, never inside headings, quotes, or code.";
 
 const TUTOR: &str = "Answer as a tutor helping the user learn this material. Build up ideas step by step, explain each term where it first appears, and connect new points to what the user asked before. Where it helps, end with one short question that checks understanding or points to the next step. When the user asks for the answer to an exercise, guide them toward it rather than handing it over.";

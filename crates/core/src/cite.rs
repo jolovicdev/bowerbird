@@ -8,7 +8,8 @@ const MIN_QUOTE_CHARS: usize = 8;
 /// Shortest piece of a quote with an ellipsis, in letters and digits. Shorter
 /// pieces can be strung together from scattered words of a long passage.
 const MIN_PIECE_CHARS: usize = 10;
-/// Most letters and digits an ellipsis may stand for: about two sentences.
+/// Most letters and digits an ellipsis may stand for, as `length_in_letters`
+/// counts them: about two sentences.
 const MAX_ELISION: usize = 300;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -144,7 +145,7 @@ pub fn verify(quote: &str, passage: &str) -> bool {
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect();
-    let total: usize = parts.iter().map(String::len).sum();
+    let total: usize = parts.iter().map(|p| p.chars().count()).sum();
     if parts.is_empty() || total < MIN_QUOTE_CHARS {
         return false;
     }
@@ -163,8 +164,29 @@ fn in_order(passage: &str, parts: &[String], from: usize, elided: bool) -> bool 
     };
     let tail = &passage[from..];
     tail.match_indices(part.as_str())
-        .take_while(|&(at, _)| !elided || tail[..at].chars().count() <= MAX_ELISION)
+        .take_while(|&(at, _)| !elided || length_in_letters(&tail[..at]) <= MAX_ELISION)
         .any(|(at, _)| in_order(passage, rest, from + at + part.len(), true))
+}
+
+/// Length of normalized text in letters. A Han, kana or Hangul character
+/// writes a whole syllable or word, and a sentence takes about a third as many
+/// of them, so each counts as three.
+fn length_in_letters(s: &str) -> usize {
+    s.chars()
+        .map(|c| match c {
+            '\u{1100}'..='\u{11FF}'
+            | '\u{3040}'..='\u{30FF}'
+            | '\u{3130}'..='\u{318F}'
+            | '\u{31F0}'..='\u{31FF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{AC00}'..='\u{D7AF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FF66}'..='\u{FF9F}'
+            | '\u{20000}'..='\u{323AF}' => 3,
+            _ => 1,
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -209,6 +231,31 @@ mod tests {
             "Wars came and went. ".repeat(20)
         );
         assert!(verify("The levy was raised … the towns paid it", &passage));
+    }
+
+    #[test]
+    fn short_quotes_are_counted_in_characters_in_every_script() {
+        let passage = "和平条约结束了三十年战争。";
+        assert!(!verify("和平条约", passage));
+        assert!(verify("和平条约结束了三十年", passage));
+    }
+
+    #[test]
+    fn an_ellipsis_spans_about_as_many_sentences_in_chinese_as_in_english() {
+        let passage = "园丁鸟用树枝搭建一座小屋，并在屋前铺上一层绿色苔藓。\
+            它把收集来的物品按照颜色分成几堆，整齐地摆放在苔藓上面。\
+            雌鸟会先后拜访好几座小屋，仔细评判每一处的布置，然后才做出选择。\
+            那些把物品堆得整齐有序的雄鸟，更容易得到雌鸟的青睐。\
+            研究人员发现，雄鸟会不断调整物品的位置，让布置显得更加醒目。\
+            有的雄鸟甚至会偷走邻居的蓝色物品，放进自己的收藏里。";
+        assert!(verify(
+            "园丁鸟用树枝搭建一座小屋 … 它把收集来的物品按照颜色分成几堆",
+            passage
+        ));
+        assert!(!verify(
+            "园丁鸟用树枝搭建一座小屋 … 有的雄鸟甚至会偷走邻居的蓝色物品",
+            passage
+        ));
     }
 
     #[test]

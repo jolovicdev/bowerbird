@@ -242,9 +242,10 @@ questions.
   `cargo deny` for licenses (`deny.toml`) and advisories.
 - `.github/workflows/live.yml`, daily: the live tests and the end-to-end
   tests. Needs the `DEEPSEEK_API_KEY` repository secret.
-- `.github/workflows/release.yml`, weekly and on `v*` tags: the Linux,
+- `.github/workflows/release.yml`, on `v*` tags and manual runs: the Linux,
   macOS, Windows and Android builds; a tag publishes them as a GitHub
-  release. The APK gets the release key from the `ANDROID_KEYSTORE`
+  release. It also runs weekly without macOS, whose runner minutes cost ten
+  times as much. The APK gets the release key from the `ANDROID_KEYSTORE`
   (base64 of the keystore) and `ANDROID_KEYSTORE_PASSWORD` repository
   secrets.
 
@@ -253,4 +254,6 @@ questions.
 [MIT](LICENSE). The software by others in the releases, and the models the
 app downloads, are listed with their licenses in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-[ARCHITECTURE.md](ARCHITECTURE.md) describes how the code fits together.
+[ARCHITECTURE.md](ARCHITECTURE.md) describes how the code fits together,
+[CONTRIBUTING.md](CONTRIBUTING.md) how to send a change, and
+[SECURITY.md](SECURITY.md) how to report a vulnerability.

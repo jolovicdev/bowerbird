@@ -1,0 +1,15 @@
+name: Feature request
+description: Something Bowerbird should do.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you're trying to do
+      description: The task, and where Bowerbird gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help

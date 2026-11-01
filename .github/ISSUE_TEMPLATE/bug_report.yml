@@ -1,0 +1,43 @@
+name: Bug report
+description: Something doesn't work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: "0.1.2"
+    validations:
+      required: true
+  - type: dropdown
+    id: app
+    attributes:
+      label: App
+      options:
+        - Desktop app on Linux
+        - Desktop app on macOS
+        - Desktop app on Windows
+        - Android app
+        - Web app from bowerbird-server
+        - Command line
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: The chat model in Settings, if the problem is with answers.
+      placeholder: deepseek-flash
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error messages
+      description: Anything Bowerbird showed or printed. Leave out API keys.
+      render: text

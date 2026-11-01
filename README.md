@@ -16,8 +16,8 @@ you choose.
 ## Every quote is checked
 
 Each citation in an answer carries the words it quotes. Bowerbird looks those
-words up in the source the citation names: in the cited passage, or in a
-neighboring passage of the same source, since a quote can run across a
+words up in the source the citation names: in the cited passage, or in
+another passage of the same source, since a quote can run across a
 passage boundary. A quote that isn't there, or that the answer attributes to
 the wrong source, is marked unverified, and the footer counts how many were
 found. A quote shortened with an ellipsis counts only when each of its

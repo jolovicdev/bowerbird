@@ -136,6 +136,16 @@ fn normalize(v: &mut [f32]) {
     }
 }
 
+/// Downloads the model for a live test. Tests run in parallel, and two
+/// downloads of one file write the same partial file, so the slower one
+/// finds it already renamed; the tests take turns instead.
+#[cfg(test)]
+pub(crate) async fn download_for_tests() {
+    static TURN: futures::lock::Mutex<()> = futures::lock::Mutex::new(());
+    let _turn = TURN.lock().await;
+    download(&dir(), |_, _| {}).await.unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,7 +170,7 @@ mod tests {
             eprintln!("skipped: set BOWERBIRD_LIVE=1 to download the search model");
             return;
         }
-        download(&dir(), |_, _| {}).await.unwrap();
+        download_for_tests().await;
         let embedder = Embedder::load(&dir()).unwrap();
         let docs = embedder
             .documents(&[

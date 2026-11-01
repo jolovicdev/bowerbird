@@ -445,9 +445,7 @@ mod tests {
             eprintln!("skipped: set BOWERBIRD_LIVE=1 to download the search model");
             return;
         }
-        crate::embed::download(&crate::embed::dir(), |_, _| {})
-            .await
-            .unwrap();
+        crate::embed::download_for_tests().await;
         let dir = std::env::temp_dir().join(format!("bowerbird-meaning-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut nb = Notebook::open_or_create(&dir, "Birds").unwrap();

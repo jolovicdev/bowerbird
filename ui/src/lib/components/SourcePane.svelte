@@ -162,7 +162,8 @@
 	let problem = $state<string | null>(null);
 
 	async function read(n: number) {
-		const id = source.id;
+		// The effect below calls this, so reading `source` here would rerun it on every notebook refresh.
+		const id = sourceId;
 		ord = n;
 		passage = null;
 		problem = null;

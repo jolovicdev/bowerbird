@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bowerbird-core = { version = "0.1.0", path = "../core" }
 loqui-g2p = "0.4"
 loqui-kokoro = "0.4"
 loqui-whisper = "0.4"

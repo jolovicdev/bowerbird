@@ -18,7 +18,7 @@ pub async fn files(
     files: &[(&str, &str)],
     progress: impl Fn(u64, u64),
 ) -> Result<()> {
-    let http = reqwest::Client::builder()
+    let http = crate::http::client()
         .connect_timeout(Duration::from_secs(20))
         .read_timeout(Duration::from_secs(60))
         .build()

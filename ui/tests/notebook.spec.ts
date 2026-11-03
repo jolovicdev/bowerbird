@@ -312,6 +312,28 @@ test('an open source stays on screen while the notebook checks on background wor
 	expect(await passage?.evaluate((node) => node.isConnected)).toBe(true);
 });
 
+test('the phone strip shows indexing as a line along its edge and the contents say it in words', async ({ page }) => {
+	await page.route('**/api/notebooks/*', async (route) => {
+		const response = await route.fetch();
+		const notebook = await response.json();
+		await route.fulfill({ response, json: { ...notebook, embedding: { stage: 'embedding', done: 61, total: 100 } } });
+	});
+	await notebookWithArticle(page);
+	await page.keyboard.press('Escape');
+	await page.setViewportSize({ width: 412, height: 915 });
+	const contents = page.getByRole('complementary', { name: 'Contents' });
+	const note = contents.getByRole('status');
+	await expect(note).toHaveText(/Indexing by meaning, 61%/);
+	const strip = await contents.boundingBox();
+	const noteInStrip = await note.boundingBox();
+	expect(noteInStrip!.y + noteInStrip!.height).toBeLessThanOrEqual(strip!.y + strip!.height);
+	expect(noteInStrip!.y).toBeGreaterThanOrEqual(strip!.y);
+	await expect(contents.locator('.index-line')).toHaveCSS('background-size', /^61% /);
+	await page.getByRole('button', { name: 'Contents' }).click();
+	const noteInContents = await note.boundingBox();
+	expect(noteInContents!.width).toBeGreaterThan(200);
+});
+
 test("adds the files it can and names each one it can't", async ({ page }) => {
 	const dir = mkdtempSync(join(tmpdir(), 'bowerbird-batch-'));
 	const big = join(dir, 'atlas.pdf');

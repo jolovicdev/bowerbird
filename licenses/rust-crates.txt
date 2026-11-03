@@ -15581,11 +15581,11 @@ SOFTWARE.
 
 ==============================================================================
 MIT License (MIT)
-bowerbird 0.1.2
-bowerbird-core 0.1.2
-bowerbird-desktop 0.1.2
-bowerbird-server 0.1.2
-bowerbird-speech 0.1.2
+bowerbird 0.1.3
+bowerbird-core 0.1.3
+bowerbird-desktop 0.1.3
+bowerbird-server 0.1.3
+bowerbird-speech 0.1.3
 block2 0.6.2
 dlopen2 0.8.2
 dlopen2_derive 0.4.3
@@ -15782,7 +15782,7 @@ SOFTWARE.
 
 ==============================================================================
 MIT License (MIT)
-pulldown-cmark 0.13.5
+pulldown-cmark 0.13.6
 ------------------------------------------------------------------------------
 The MIT License
 

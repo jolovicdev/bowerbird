@@ -161,6 +161,10 @@ pub fn client(settings: SharedSettings) -> Result<genai::Client> {
     });
     let http = genai::WebConfig::default()
         .apply_to_builder(crate::http::client())
+        // genai's adaptive window starts at 64 KiB, and h2 sizes its allowance
+        // for unread small frames from the window: tokens arriving faster than
+        // the stream is read would close the connection with ENHANCE_YOUR_CALM.
+        .http2_adaptive_window(false)
         .build()
         .map_err(|e| Error::Model(e.to_string()))?;
     genai::Client::builder()

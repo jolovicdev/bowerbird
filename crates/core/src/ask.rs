@@ -159,7 +159,12 @@ pub fn client(settings: SharedSettings) -> Result<genai::Client> {
             }),
         }
     });
+    let http = genai::WebConfig::default()
+        .apply_to_builder(crate::http::client())
+        .build()
+        .map_err(|e| Error::Model(e.to_string()))?;
     genai::Client::builder()
+        .with_reqwest(http)
         .with_auth_resolver(resolver)
         .build()
         .map_err(|e| Error::Model(e.to_string()))

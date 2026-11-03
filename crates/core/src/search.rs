@@ -77,7 +77,7 @@ pub async fn queries(client: &genai::Client, model: &str, question: &str) -> Res
 
 /// Searches with the backend chosen in Settings.
 pub async fn search(settings: &Settings, query: &str) -> Result<Vec<Hit>> {
-    let http = reqwest::Client::builder()
+    let http = crate::http::client()
         .timeout(TIMEOUT)
         .user_agent(concat!(
             "Mozilla/5.0 (compatible; Bowerbird/",

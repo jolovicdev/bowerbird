@@ -64,7 +64,7 @@ pub fn video_id(url: &str) -> Option<String> {
 }
 
 pub async fn transcript(id: &str) -> Result<Transcript> {
-    let http = reqwest::Client::builder()
+    let http = crate::http::client()
         .timeout(TIMEOUT)
         .build()
         .map_err(|e| Error::Http(e.to_string()))?;

@@ -135,7 +135,7 @@ async fn body(mut response: reqwest::Response, max: usize) -> reqwest::Result<Op
 /// redirects to an address written out as numbers are checked as they come.
 fn client(reach: Reach) -> reqwest::ClientBuilder {
     let builder =
-        reqwest::Client::builder().user_agent(concat!("Bowerbird/", env!("CARGO_PKG_VERSION")));
+        crate::http::client().user_agent(concat!("Bowerbird/", env!("CARGO_PKG_VERSION")));
     match reach {
         Reach::Any => builder,
         Reach::Public => {

@@ -66,6 +66,12 @@
 	} = $props();
 
 	const off = $derived(sources.filter((s) => s.excluded));
+	/** The share of the model download or indexing done, when the total is known. */
+	const indexed = $derived(
+		(embedding?.stage === 'downloading' || embedding?.stage === 'embedding') && embedding.total
+			? embedding.done / embedding.total
+			: null
+	);
 	const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 	function studyMeta(s: StudySummary): string {
 		switch (s.kind) {
@@ -191,6 +197,9 @@
 			</ol>
 			{#if embedding}
 				<p class="index-note" role="status">{embeddingNote(embedding)}</p>
+				{#if embedding.stage !== 'failed'}
+					<span class="progress index-line" class:measured={indexed !== null} style:--indexed={indexed} aria-hidden="true"></span>
+				{/if}
 			{/if}
 			{#if off.length}
 				<p class="off-note">
@@ -447,6 +456,9 @@
 		background: linear-gradient(var(--rubric), var(--rubric)) no-repeat left / 35% 100%, var(--line);
 		animation: draw 1.6s var(--ease) infinite;
 	}
+	.index-line {
+		display: none;
+	}
 	@keyframes draw {
 		from {
 			background-size: 0 100%, auto;
@@ -555,6 +567,26 @@
 		.contents:not(.open) .switch,
 		.contents:not(.open) .off-note {
 			display: none;
+		}
+		/* The strip has no room for the sentence, which the open contents show:
+		   its edge shows the progress, and screen readers still get the words. */
+		.contents:not(.open) .index-note {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip-path: inset(50%);
+			white-space: nowrap;
+		}
+		.contents:not(.open) .index-line {
+			display: block;
+			position: absolute;
+			inset: -1px 0 auto;
+			margin: 0;
+		}
+		.contents:not(.open) .index-line.measured {
+			background-size: calc(var(--indexed) * 100%) 100%, auto;
+			animation: none;
 		}
 		.contents:not(.open) .sources-part {
 			display: flex;

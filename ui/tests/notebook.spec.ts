@@ -297,6 +297,21 @@ test('adds a Word document and an EPUB and opens each at its headings', async ({
 	await expect(page.locator('.heading-link')).toHaveText(['Negotiations', 'Terms']);
 });
 
+test('an open source stays on screen while the notebook checks on background work', async ({ page }) => {
+	// A model still downloading keeps the page fetching the notebook every two seconds.
+	await page.route('**/api/notebooks/*', async (route) => {
+		const response = await route.fetch();
+		const notebook = await response.json();
+		await route.fulfill({ response, json: { ...notebook, embedding: { stage: 'downloading', done: 0, total: 0 } } });
+	});
+	await notebookWithArticle(page);
+	await page.keyboard.press('Escape');
+	await page.getByRole('complementary', { name: 'Contents' }).getByRole('button', { name: /^Bowerbird Courtship Displays, source/ }).click();
+	const passage = await page.locator('.pane .passage').elementHandle();
+	for (let check = 0; check < 3; check++) await page.waitForResponse(/\/api\/notebooks\/[^/]+$/);
+	expect(await passage?.evaluate((node) => node.isConnected)).toBe(true);
+});
+
 test("adds the files it can and names each one it can't", async ({ page }) => {
 	const dir = mkdtempSync(join(tmpdir(), 'bowerbird-batch-'));
 	const big = join(dir, 'atlas.pdf');

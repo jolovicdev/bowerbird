@@ -1,6 +1,7 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Theme.bowerbird_desktop" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <!-- Shows under the system bars: the page colour from ui/src/app.css. -->
+        <item name="android:windowBackground">#14161b</item>
     </style>
 </resources>

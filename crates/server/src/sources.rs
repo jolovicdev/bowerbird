@@ -162,8 +162,14 @@ pub(crate) async fn add_url(
                         }
                     }
                 }
+                // The link was a source when this request began, so its page
+                // wasn't fetched, and the source has since been removed.
                 (None, None) => {
-                    unreachable!("the page is fetched unless the link was already a source")
+                    return Err(ApiError(
+                        StatusCode::CONFLICT,
+                        "That source was removed while the link was being added. Add the link again."
+                            .into(),
+                    ));
                 }
             }
             Ok(Json(NotebookView {
@@ -451,4 +457,40 @@ pub(crate) async fn source_image(
         Ok((headers, bytes).into_response())
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::tests::test_state;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_source_removed_while_its_link_is_added_again_is_reported() {
+        const URL: &str = "https://example.org/bowers";
+        let (state, library) = test_state("link-race");
+        let mut nb = Notebook::open_or_create(&library.join("birds"), "Birds").unwrap();
+        let page = web::Page {
+            content_type: "text/html".into(),
+            bytes: b"<html><title>Bowers</title><body><p>Satin bowerbirds prefer blue objects.</p></body></html>".to_vec(),
+            transcript: None,
+        };
+        let source = nb.add_web_page(URL, &page).unwrap();
+        // The request finds the link already there, then waits for the notebook.
+        let lock = state.lock_for("birds");
+        let guard = lock.lock().unwrap();
+        let adding = tokio::spawn(add_url(
+            State(state.clone()),
+            UrlPath("birds".to_string()),
+            Body(NewUrl {
+                url: URL.to_string(),
+            }),
+        ));
+        std::thread::sleep(Duration::from_millis(200));
+        nb.remove_source(&source.id).unwrap();
+        drop(guard);
+        let refused = adding.await.unwrap().err().unwrap();
+        assert_eq!(refused.0, StatusCode::CONFLICT, "{}", refused.1);
+    }
 }

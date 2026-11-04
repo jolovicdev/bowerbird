@@ -42,13 +42,41 @@ impl Page {
     pub fn html(&self) -> Result<String> {
         let ct = &self.content_type;
         if ct.is_empty() || ct.starts_with("text/") || ct.contains("html") || ct.contains("xml") {
-            Ok(String::from_utf8_lossy(&self.bytes).into_owned())
+            Ok(decode(&self.bytes, ct))
         } else {
             Err(Error::Invalid(format!(
                 "The link points at a {ct} file. Bowerbird reads web pages and PDFs."
             )))
         }
     }
+}
+
+/// How far into a page a `<meta>` tag can declare its charset, as for browsers.
+const META_CHARSET_BYTES: usize = 1024;
+
+/// A page's text in the charset its Content-Type declares, else its `<meta>`
+/// tag, else UTF-8. A byte order mark wins over them all.
+fn decode(bytes: &[u8], content_type: &str) -> String {
+    let head =
+        String::from_utf8_lossy(&bytes[..bytes.len().min(META_CHARSET_BYTES)]).to_ascii_lowercase();
+    let encoding = charset_in(content_type)
+        .or_else(|| {
+            head.split("<meta")
+                .skip(1)
+                .find_map(|tag| charset_in(tag.split('>').next()?))
+        })
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .unwrap_or(encoding_rs::UTF_8);
+    encoding.decode(bytes).0.into_owned()
+}
+
+/// The value after `charset=`, without its quotes.
+fn charset_in(text: &str) -> Option<&str> {
+    let (_, rest) = text.split_once("charset=")?;
+    rest.trim_start_matches(['"', '\''])
+        .split(['"', '\'', ';', ' ', '/'])
+        .next()
+        .filter(|label| !label.is_empty())
 }
 
 /// Last path segment of a URL, as a fallback title for a linked file.
@@ -939,6 +967,40 @@ mod tests {
         assert!(fetch_images(&src, &page, Reach::Public).await.is_empty());
         let elsewhere = format!("http://localhost:{port}/bowers.html");
         assert!(fetch_images(&src, &elsewhere, Reach::Any).await.is_empty());
+    }
+
+    #[test]
+    fn pages_are_read_in_the_charset_they_declare() {
+        let html = |content_type: &str, bytes: &[u8]| {
+            Page {
+                content_type: content_type.to_string(),
+                bytes: bytes.to_vec(),
+                transcript: None,
+            }
+            .html()
+            .unwrap()
+        };
+        let mueller = b"<p>Der M\xfcller</p>";
+        assert!(html("text/html; charset=windows-1252", mueller).contains("Müller"));
+        assert!(html("text/html;charset=\"iso-8859-1\"", mueller).contains("Müller"));
+        assert!(html("text/html; charset=windows-1251", b"<p>\xcc\xe8\xf0</p>").contains("Мир"));
+        assert!(
+            html(
+                "text/html",
+                b"<head><meta charset=\"windows-1250\"></head><p>\x9aljiva</p>"
+            )
+            .contains("šljiva")
+        );
+        assert!(
+            html(
+                "text/html",
+                b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=ISO-8859-2\"><p>\xb9ljiva</p>"
+            )
+            .contains("šljiva")
+        );
+        let utf8 = "<p>Der Müller</p>".as_bytes();
+        assert!(html("text/html", utf8).contains("Müller"));
+        assert!(html("text/html; charset=nonsense", utf8).contains("Müller"));
     }
 
     #[tokio::test]

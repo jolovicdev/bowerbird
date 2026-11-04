@@ -177,18 +177,22 @@ impl Index {
             report.removed += 1;
         }
         for source in nb.sources.iter().filter(|s| !indexed.contains(&s.id)) {
-            match nb.extract(source) {
-                Ok(doc) => {
-                    let markdown = matches!(
-                        source.kind,
-                        SourceKind::Markdown
-                            | SourceKind::Web
-                            | SourceKind::Docx
-                            | SourceKind::Epub
-                            | SourceKind::Youtube
-                            | SourceKind::Audio
-                    );
-                    let chunks = chunk::split(&doc, markdown);
+            let read = guarded(|| {
+                let doc = nb.extract(source)?;
+                let markdown = matches!(
+                    source.kind,
+                    SourceKind::Markdown
+                        | SourceKind::Web
+                        | SourceKind::Docx
+                        | SourceKind::Epub
+                        | SourceKind::Youtube
+                        | SourceKind::Audio
+                );
+                let chunks = chunk::split(&doc, markdown);
+                Ok((doc, chunks))
+            });
+            match read {
+                Ok((doc, chunks)) => {
                     self.insert(&source.id, &doc, &chunks)?;
                     report.added.push((source.id.clone(), chunks.len()));
                 }
@@ -623,10 +627,29 @@ pub fn query_terms(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Runs `read`, turning a panic into a failure of the one source being read.
+/// The source stays listed, so a panic would fail every later open of its
+/// notebook, whose page is where it can be removed.
+fn guarded<T>(read: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or_else(|_| {
+        Err(Error::Invalid(
+            "Bowerbird hit a bug reading this source. Remove it, and please report the problem."
+                .into(),
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::notebook::Notebook;
+
+    #[test]
+    fn a_panic_reading_a_source_is_that_source_s_failure() {
+        assert_eq!(guarded(|| Ok(1)).unwrap(), 1);
+        let failed = guarded(|| -> Result<u32> { panic!("a bug in a reader") });
+        assert!(failed.unwrap_err().to_string().contains("hit a bug"));
+    }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("bowerbird-{name}-{}", std::process::id()));

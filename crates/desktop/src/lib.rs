@@ -64,15 +64,17 @@ pub fn run() {
             });
             let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(home))
                 .on_navigation(move |url| {
-                    let elsewhere = matches!(url.scheme(), "http" | "https" | "mailto")
-                        && url.origin().ascii_serialization() != origin;
+                    let elsewhere =
+                        opens_outside(url) && url.origin().ascii_serialization() != origin;
                     if elsewhere {
                         open_in_browser(url);
                     }
                     !elsewhere
                 })
                 .on_new_window(|url, _| {
-                    open_in_browser(&url);
+                    if opens_outside(&url) {
+                        open_in_browser(&url);
+                    }
                     NewWindowResponse::Deny
                 });
             #[cfg(desktop)]
@@ -143,6 +145,12 @@ fn unused_path(dir: &Path, name: &Path) -> PathBuf {
     path
 }
 
+/// Addresses the system may open. Any other scheme starts whatever program
+/// registered it, and a page's links can come from someone else's notebook.
+fn opens_outside(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "mailto")
+}
+
 /// Links to other sites open in the system browser; the window shows only
 /// Bowerbird.
 fn open_in_browser(url: &Url) {
@@ -169,6 +177,27 @@ fn open_in_browser(url: &Url) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_web_and_mail_links_reach_the_system() {
+        let opens = |address: &str| opens_outside(&address.parse().unwrap());
+        for address in [
+            "https://example.org/",
+            "http://example.org/",
+            "mailto:someone@example.org",
+        ] {
+            assert!(opens(address), "{address}");
+        }
+        for address in [
+            "ms-msdt:/id PCWDiagnostic",
+            "file:///etc/passwd",
+            "calculator:",
+            "javascript:alert(1)",
+            "smb://host/share",
+        ] {
+            assert!(!opens(address), "{address}");
+        }
+    }
 
     #[test]
     fn downloads_never_replace_a_file() {

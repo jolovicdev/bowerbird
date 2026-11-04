@@ -44,6 +44,7 @@ check for updates. This is everything that goes out:
 | A YouTube video you add | YouTube, for the video's captions | When you add it |
 | A web search for sources | The search service set in Settings: your own SearXNG, DuckDuckGo, Brave, Tavily or Exa | Each search |
 | Requests for the local models | Hugging Face and GitHub; each file is checked against its recorded SHA-256 | Each model's first use |
+| A short test message, with nothing from your notebooks | The model provider you choose | Each time you press Test model and key in Settings |
 
 API keys go only to their own provider. Choose an
 [Ollama](https://ollama.com) model running on your machine, and questions and
@@ -112,7 +113,8 @@ The default model is `deepseek-flash`. Any provider that
 OpenAI, Anthropic, Gemini, DeepSeek, Mistral, Groq, xAI, OpenRouter and
 Ollama. In Settings, enter the model name (prefix it with the provider, as in
 `groq::model-name`, to choose the provider yourself) and paste the provider's
-API key.
+API key. **Test model and key** sends one short message to check that they
+work, and shows the provider's reason when they don't.
 
 Keys are saved in `settings.toml`, readable only by your user account:
 `~/.config/bowerbird/` on Linux and macOS, `%APPDATA%\bowerbird\` on Windows,

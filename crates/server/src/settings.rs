@@ -57,6 +57,21 @@ pub(crate) async fn get_settings(State(state): State<AppState>) -> Json<Settings
     Json(settings_view(&state.settings()))
 }
 
+#[derive(Serialize)]
+pub(crate) struct ModelTest {
+    provider: &'static str,
+}
+
+/// Sends the model in Settings one short message.
+pub(crate) async fn test_model(State(state): State<AppState>) -> ApiResult<Json<ModelTest>> {
+    let model = state.settings().chat_model().to_string();
+    let client = ask::client(state.settings.clone())?;
+    ask::check_model(&client, &model).await?;
+    Ok(Json(ModelTest {
+        provider: ask::provider_name(&model),
+    }))
+}
+
 #[derive(Deserialize)]
 pub(crate) struct SettingsUpdate {
     /// An empty name means the default model.

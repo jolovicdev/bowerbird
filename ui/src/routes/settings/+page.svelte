@@ -10,6 +10,10 @@
 	let modelSaved = $state(false);
 	let modelError = $state<string | null>(null);
 
+	let testing = $state(false);
+	let tested = $state<string | null>(null);
+	let testError = $state<string | null>(null);
+
 	let backend = $state<SearchBackend>('duckduckgo');
 	let searxng = $state('');
 	let searchSaved = $state(false);
@@ -41,12 +45,31 @@
 		event.preventDefault();
 		modelSaved = false;
 		modelError = null;
+		forgetTest();
 		try {
 			settings = await api.saveSettings({ chat_model: model.trim() });
 			model = settings.chat_model;
 			modelSaved = true;
 		} catch (e) {
 			modelError = describe(e);
+		}
+	}
+
+	function forgetTest() {
+		tested = null;
+		testError = null;
+	}
+
+	async function testModel() {
+		forgetTest();
+		testing = true;
+		try {
+			const { provider } = await api.testModel();
+			tested = `It works: ${provider} answered.`;
+		} catch (e) {
+			testError = describe(e);
+		} finally {
+			testing = false;
 		}
 	}
 
@@ -86,6 +109,7 @@
 
 	async function saveKey(event: SubmitEvent, env: string) {
 		event.preventDefault();
+		forgetTest();
 		try {
 			settings = await api.saveSettings({ keys: { [env]: key.trim() } });
 			editing = null;
@@ -96,6 +120,7 @@
 	}
 
 	async function removeKey(env: string) {
+		forgetTest();
 		try {
 			settings = await api.saveSettings({ keys: { [env]: '' } });
 		} catch (e) {
@@ -163,7 +188,10 @@
 						autocapitalize="none"
 						autocorrect="off"
 						spellcheck="false"
-						oninput={() => (modelSaved = false)}
+						oninput={() => {
+							modelSaved = false;
+							forgetTest();
+						}}
 					/>
 					<button class="primary" disabled={model.trim() === settings.chat_model}>Save</button>
 				</div>
@@ -173,6 +201,19 @@
 				</p>
 				{#if modelSaved}<p class="hint" role="status">Saved. New questions use {settings.chat_model}.</p>{/if}
 				{#if modelError}<p class="problem" role="alert">{modelError}</p>{/if}
+				<p class="test">
+					<button
+						type="button"
+						class="action"
+						disabled={testing || model.trim() !== settings.chat_model}
+						onclick={testModel}
+					>
+						{testing ? 'Testing…' : 'Test model and key'}
+					</button>
+					<span class="hint">Sends one short message, which can cost a tiny amount.</span>
+				</p>
+				{#if tested}<p class="hint" role="status">{tested}</p>{/if}
+				{#if testError}<p class="problem" role="alert">{testError}</p>{/if}
 			</form>
 		</section>
 
@@ -361,6 +402,20 @@
 	.action.quiet {
 		color: var(--ink-2);
 		font-weight: 400;
+	}
+	.action:disabled {
+		color: var(--ink-2);
+		cursor: default;
+	}
+	.test {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.25rem 0.75rem;
+		align-items: baseline;
+		margin: 0.75rem 0 0;
+	}
+	.test .hint {
+		margin: 0;
 	}
 	.key {
 		margin-top: 0.6rem;

@@ -410,3 +410,21 @@ test('keeps the pictures of a web page and shows them beside their captions', as
 		site.close();
 	}
 });
+
+test('tests the model and key from Settings and shows what the provider says', async ({ page }) => {
+	await page.goto('/settings#token=e2e');
+	const testButton = page.getByRole('button', { name: 'Test model and key' });
+	await testButton.click();
+	await expect(page.getByRole('status')).toHaveText('It works: DeepSeek answered.', { timeout: 60_000 });
+
+	const refusal = 'OpenRouter refused the request (402): Insufficient credits';
+	await page.route('**/api/settings/test', (route) => route.fulfill({ status: 502, json: { error: refusal } }));
+	await testButton.click();
+	await expect(page.getByRole('alert')).toHaveText(refusal);
+	await expect(page.getByRole('status')).toHaveCount(0);
+
+	// The test uses the saved name, so a name still being typed can't be tested.
+	await page.getByLabel('Model for answers').fill('another-model');
+	await expect(testButton).toBeDisabled();
+	await expect(page.getByRole('alert')).toHaveCount(0);
+});

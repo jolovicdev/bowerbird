@@ -111,6 +111,7 @@ pub fn router(config: Config) -> Router {
             "/settings",
             get(settings::get_settings).put(settings::put_settings),
         )
+        .route("/settings/test", post(settings::test_model))
         .route(
             "/notebooks",
             get(notebooks::list_notebooks).post(notebooks::create_notebook),
@@ -494,6 +495,25 @@ mod tests {
         )
         .await;
         assert!(unknown.starts_with("HTTP/1.1 400"));
+    }
+
+    #[tokio::test]
+    async fn the_model_test_says_what_is_missing() {
+        let addr = serve("model-test").await;
+        let t = Some("right-token");
+        assert!(
+            call(addr, "POST", "/api/settings/test", None, "")
+                .await
+                .contains("401")
+        );
+        let body = r#"{"chat_model":"Heabsy:some-model"}"#;
+        call(addr, "PUT", "/api/settings", t, body).await;
+        let tested = call(addr, "POST", "/api/settings/test", t, "").await;
+        assert!(tested.starts_with("HTTP/1.1 502"), "{tested}");
+        assert_eq!(
+            json_body(&tested)["error"],
+            "No API key for Heabsy. Add one in Settings."
+        );
     }
 
     #[tokio::test]

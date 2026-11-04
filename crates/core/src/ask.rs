@@ -130,6 +130,28 @@ impl From<&Answer> for Exchange {
     }
 }
 
+impl Answer {
+    /// The text with each citation marker naming the passage its quote was
+    /// found in. A saved note checks a quote only in the passage its marker
+    /// names, so the label the model wrote could turn a found quote unverified.
+    pub fn text_with_found_labels(&self) -> String {
+        let mut parser = cite::Parser::default();
+        let mut pieces = parser.feed(&self.text);
+        pieces.extend(parser.finish());
+        let mut citations = self.citations.iter();
+        pieces
+            .into_iter()
+            .map(|piece| match piece {
+                Piece::Text(text) => text,
+                Piece::Cite { label, quote } => {
+                    let label = citations.next().map_or(label, |c| c.label.clone());
+                    format!("[[{label}|{quote}]]")
+                }
+            })
+            .collect()
+    }
+}
+
 /// Answer text without citation markers. Old labels point at passages the
 /// next prompt may not include, so the model shouldn't see them.
 pub fn plain_text(text: &str) -> String {
@@ -736,6 +758,38 @@ mod tests {
         let ctx = retrieve::gather_overview(&index, &nb).unwrap();
         let text = prompt(&index, &nb, &ctx, "What is the exam tip?").unwrap();
         assert!(text.contains("switched these sources off") && text.contains("B. Lecture notes"));
+    }
+
+    #[test]
+    fn a_saved_answer_names_the_passages_its_quotes_were_found_in() {
+        let passages = vec![
+            passage("A1", "a", "Satin bowerbirds prefer blue objects."),
+            passage("A2", "a", "Regent bowerbirds paint with fruit juice."),
+        ];
+        let text = "They paint [[A1|paint with fruit juice]], like blue [[A1|prefer blue objects]], and fly [[A2|flying over the moon tonight]].";
+        let mut parser = cite::Parser::default();
+        let mut pieces = parser.feed(text);
+        pieces.extend(parser.finish());
+        let citations = pieces
+            .into_iter()
+            .filter_map(|piece| match piece {
+                Piece::Cite { label, quote } => Some(resolve(&label, quote, &passages)),
+                Piece::Text(_) => None,
+            })
+            .collect();
+        let answer = Answer {
+            ts: 0,
+            question: String::new(),
+            model: String::new(),
+            text: text.to_string(),
+            citations,
+            timings: Timings::default(),
+            deep: false,
+        };
+        assert_eq!(
+            answer.text_with_found_labels(),
+            "They paint [[A2|paint with fruit juice]], like blue [[A1|prefer blue objects]], and fly [[A2|flying over the moon tonight]]."
+        );
     }
 
     #[tokio::test]

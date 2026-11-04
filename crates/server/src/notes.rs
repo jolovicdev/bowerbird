@@ -267,7 +267,7 @@ async fn report_job(
         let lock = state.lock_for(&slug);
         let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
         let id = nb.new_item_id("notes", "md");
-        nb.write_note(&id, &title, &written.text)?;
+        nb.write_note(&id, &title, &written.text_with_found_labels())?;
         note_view(&nb, id)
     })
     .await?;

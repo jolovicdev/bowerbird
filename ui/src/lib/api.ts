@@ -351,6 +351,7 @@ export const api = {
 	settings: () => request<Settings>('/settings'),
 	saveSettings: (update: { chat_model?: string; keys?: Record<string, string>; search?: SearchSettings }) =>
 		send<Settings>('PUT', '/settings', update),
+	testModel: () => request<{ provider: string }>('/settings/test', { method: 'POST' }),
 	addFiles: (slug: string, files: File[]) => {
 		const form = new FormData();
 		for (const file of files) form.append('file', file, file.name);

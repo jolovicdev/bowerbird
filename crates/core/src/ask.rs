@@ -298,6 +298,37 @@ pub(crate) fn model_error(model: &str, error: genai::Error) -> Error {
     Error::Model(message)
 }
 
+/// Sends one short message the way an answer goes out, to find out whether the
+/// model name, the key and the account behind it all work. A provider's model
+/// list can't tell, since several hand it to any key. Costs a few tokens.
+pub async fn check_model(client: &genai::Client, model: &str) -> Result<()> {
+    match reply_starts(client, model).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Error::Model(format!(
+            "{} sent no reply.",
+            provider_name(model)
+        ))),
+        Err(e) => Err(model_error(model, e)),
+    }
+}
+
+async fn reply_starts(
+    client: &genai::Client,
+    model: impl Into<genai::ModelSpec>,
+) -> genai::Result<bool> {
+    let request = ChatRequest::new(vec![ChatMessage::user("Reply with the word OK.")]);
+    let mut stream = client.exec_chat_stream(model, request, None).await?.stream;
+    while let Some(event) = stream.next().await {
+        if matches!(
+            event?,
+            ChatStreamEvent::Chunk(_) | ChatStreamEvent::ReasoningChunk(_)
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The user message: source outline, labeled passages, then the question.
 pub fn prompt(index: &Index, nb: &Notebook, ctx: &Context, question: &str) -> Result<String> {
     let mut ids: Vec<&str> = Vec::new();
@@ -858,6 +889,28 @@ mod tests {
             let error = model_error("open_router::x", stream_failure(target).await);
             assert_eq!(error.to_string(), message);
         }
+    }
+
+    #[tokio::test]
+    async fn a_model_test_passes_only_when_a_reply_starts() {
+        let client = client(Arc::default()).unwrap();
+        let reply = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n";
+        let target = provider(AdapterKind::OpenRouter, Some(("200 OK", reply))).await;
+        assert!(reply_starts(&client, target).await.unwrap());
+        let empty = "data: [DONE]\n\n";
+        let target = provider(AdapterKind::OpenRouter, Some(("200 OK", empty))).await;
+        assert!(!reply_starts(&client, target).await.unwrap());
+        let refused = r#"{"error":{"message":"Insufficient credits","code":402}}"#;
+        let target = provider(
+            AdapterKind::OpenRouter,
+            Some(("402 Payment Required", refused)),
+        )
+        .await;
+        let failure = reply_starts(&client, target).await.unwrap_err();
+        assert_eq!(
+            model_error("open_router::x", failure).to_string(),
+            "OpenRouter refused the request (402): Insufficient credits"
+        );
     }
 
     #[tokio::test]

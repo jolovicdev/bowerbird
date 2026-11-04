@@ -96,10 +96,11 @@ fn windows(text: &str) -> Vec<(usize, &str)> {
             .map(|i| i + 2)
             .or_else(|| window.rfind('\n').filter(late).map(|i| i + 1))
             .or_else(|| {
-                window
-                    .rfind(char::is_whitespace)
-                    .filter(late)
-                    .map(|i| i + 1)
+                let (i, space) = window
+                    .char_indices()
+                    .rev()
+                    .find(|(_, c)| c.is_whitespace())?;
+                late(&i).then(|| i + space.len_utf8())
             })
             .unwrap_or(window.len());
         out.push((start, &text[start..start + cut]));
@@ -150,6 +151,17 @@ mod tests {
         let joined: String = parts.iter().map(|(_, w)| *w).collect();
         assert_eq!(joined, text);
         assert!(parts.iter().all(|(o, w)| &text[*o..*o + w.len()] == *w));
+    }
+
+    #[test]
+    fn a_cut_after_a_wide_space_lands_between_characters() {
+        for space in ["\u{3000}", "\u{a0}"] {
+            let text = format!("{}{space}{}", "語".repeat(3_000), "語".repeat(3_000));
+            let parts = windows(&text);
+            assert!(parts[0].1.ends_with(space));
+            let joined: String = parts.iter().map(|(_, w)| *w).collect();
+            assert_eq!(joined, text);
+        }
     }
 
     #[test]

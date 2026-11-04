@@ -21,14 +21,43 @@ pub(crate) fn start_reading(state: &AppState, view: &NotebookView) {
     }
 }
 
-/// Writes the text beside the PDF and indexes it. A failure is kept beside
-/// the PDF too, so it is shown instead of retried.
 async fn read_source(state: AppState, slug: String, id: String) {
+    let models = download_models(state.report(&format!("{slug}/sources/{id}")));
+    read_with(state, slug, id, models).await;
+}
+
+async fn download_models(progress: impl Fn(Progress)) -> Result<(), String> {
+    let dir = ocr::dir();
+    if !ocr::ready(&dir) {
+        progress(Progress::Downloading { done: 0, total: 0 });
+        ocr::download(&dir, |done, total| {
+            progress(Progress::Downloading { done, total })
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Writes the text beside the PDF and indexes it, once `models` are in place.
+/// A failure to read the PDF is kept beside it, so it is shown instead of
+/// retried. A failed download says nothing about the PDF, so it only takes the
+/// job's place, and a restart tries again.
+async fn read_with(
+    state: AppState,
+    slug: String,
+    id: String,
+    models: impl Future<Output = Result<(), String>>,
+) {
     let key = format!("{slug}/sources/{id}");
     if !state.claim_job(&key) {
         return;
     }
     let turn = state.speech.clone().lock_owned().await;
+    if let Err(problem) = models.await {
+        state.report(&key)(Progress::Failed { problem });
+        return;
+    }
     let outcome = reading(&state, &slug, &id, &key).await;
     let _ = blocking({
         let (state, slug) = (state.clone(), slug.clone());
@@ -59,14 +88,6 @@ async fn read_source(state: AppState, slug: String, id: String) {
 async fn reading(state: &AppState, slug: &str, id: &str, key: &str) -> Result<String, String> {
     let progress = state.report(key);
     let dir = ocr::dir();
-    if !ocr::ready(&dir) {
-        progress(Progress::Downloading { done: 0, total: 0 });
-        ocr::download(&dir, |done, total| {
-            progress(Progress::Downloading { done, total })
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-    }
     let path = blocking({
         let (state, slug, id) = (state.clone(), slug.to_string(), id.to_string());
         move || {
@@ -93,4 +114,24 @@ async fn reading(state: &AppState, slug: &str, id: &str, key: &str) -> Result<St
         return Err("No text was found on the scanned pages.".into());
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use bowerbird_core::notebook::Notebook;
+
+    use super::*;
+    use crate::tests::test_state;
+
+    #[tokio::test]
+    async fn a_failed_model_download_is_not_kept_against_the_pdf() {
+        let (state, library) = test_state("ocr-offline");
+        let mut nb = Notebook::open_or_create(&library.join("scans"), "Scans").unwrap();
+        let source = nb.add_text("In place of a scan", "Some text.").unwrap();
+        let offline = std::future::ready(Err("Couldn't download the models.".to_string()));
+        read_with(state.clone(), "scans".into(), source.id.clone(), offline).await;
+        assert!(!nb.ocr_failure_path(&source).exists());
+        let job = state.job(&format!("scans/sources/{}", source.id));
+        assert!(matches!(job, Some(Progress::Failed { .. })));
+    }
 }

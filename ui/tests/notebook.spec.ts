@@ -334,6 +334,21 @@ test('the phone strip shows indexing as a line along its edge and the contents s
 	expect(noteInContents!.width).toBeGreaterThan(200);
 });
 
+test('a failed model download reads as the problem it is', async ({ page }) => {
+	const problem = "Couldn't download pp-ocrv5_mobile_det.onnx.";
+	await page.route('**/api/notebooks/*', async (route) => {
+		const response = await route.fetch();
+		const notebook = await response.json();
+		const sources = notebook.sources.map((s: object) => ({ ...s, reading: { stage: 'failed', problem } }));
+		await route.fulfill({ response, json: { ...notebook, sources } });
+	});
+	await notebookWithArticle(page);
+	await page.keyboard.press('Escape');
+	await expect(page.getByRole('complementary', { name: 'Contents' })).toContainText(
+		`${problem} Bowerbird tries again the next time it starts.`
+	);
+});
+
 test("adds the files it can and names each one it can't", async ({ page }) => {
 	const dir = mkdtempSync(join(tmpdir(), 'bowerbird-batch-'));
 	const big = join(dir, 'atlas.pdf');

@@ -49,6 +49,7 @@ export function clock(seconds: number): string {
 /** Where a recording's transcription is, for a source's meta line. */
 export function transcribingNote(p: Progress): string {
 	const mb = (bytes: number) => Math.round(bytes / 1_000_000);
+	if (p.stage === 'failed') return `${p.problem} Bowerbird tries again the next time it starts.`;
 	if (p.stage === 'downloading')
 		return p.total ? `Downloading the transcriber, ${mb(p.done)} of ${mb(p.total)} MB` : 'Downloading the transcriber';
 	if (p.stage === 'listening' && p.done)
@@ -60,6 +61,7 @@ export function transcribingNote(p: Progress): string {
 /** Where the OCR of a scanned PDF is, for a source's meta line. */
 export function readingNote(p: Progress): string {
 	const mb = (bytes: number) => Math.round(bytes / 1_000_000);
+	if (p.stage === 'failed') return `${p.problem} Bowerbird tries again the next time it starts.`;
 	if (p.stage === 'downloading')
 		return p.total ? `Downloading the text reader, ${mb(p.done)} of ${mb(p.total)} MB` : 'Downloading the text reader';
 	if (p.stage === 'reading') return `Reading scanned pages, ${p.done} of ${p.total}`;

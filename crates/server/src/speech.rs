@@ -80,15 +80,44 @@ pub(crate) fn start_transcriptions(state: &AppState, view: &NotebookView) {
     }
 }
 
-/// Writes a recording's transcript beside it and indexes it, after any
-/// recording or transcription already running. A failure is kept beside the
-/// recording too, so it is shown instead of retried.
 async fn transcribe_source(state: AppState, slug: String, id: String) {
+    let model = download_transcriber(state.report(&format!("{slug}/sources/{id}")));
+    transcribe_with(state, slug, id, model).await;
+}
+
+async fn download_transcriber(progress: impl Fn(Progress)) -> Result<(), String> {
+    let dir = settings::models_dir().join("whisper");
+    if !bowerbird_speech::transcriber_ready(&dir) {
+        progress(Progress::Downloading { done: 0, total: 0 });
+        bowerbird_speech::download_transcriber(&dir, |done, total| {
+            progress(Progress::Downloading { done, total })
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Writes a recording's transcript beside it and indexes it, once `model` is in
+/// place and after any recording or transcription already running. A failure to
+/// transcribe is kept beside the recording, so it is shown instead of retried.
+/// A failed download says nothing about the recording, so it only takes the
+/// job's place, and a restart tries again.
+async fn transcribe_with(
+    state: AppState,
+    slug: String,
+    id: String,
+    model: impl Future<Output = Result<(), String>>,
+) {
     let key = format!("{slug}/sources/{id}");
     if !state.claim_job(&key) {
         return;
     }
     let turn = state.speech.clone().lock_owned().await;
+    if let Err(problem) = model.await {
+        state.report(&key)(Progress::Failed { problem });
+        return;
+    }
     if let Err(problem) = transcription(&state, &slug, &id, &key).await {
         let _ = blocking({
             let (state, slug) = (state.clone(), slug.clone());
@@ -112,14 +141,6 @@ async fn transcribe_source(state: AppState, slug: String, id: String) {
 async fn transcription(state: &AppState, slug: &str, id: &str, key: &str) -> Result<(), String> {
     let progress = state.report(key);
     let dir = settings::models_dir().join("whisper");
-    if !bowerbird_speech::transcriber_ready(&dir) {
-        progress(Progress::Downloading { done: 0, total: 0 });
-        bowerbird_speech::download_transcriber(&dir, |done, total| {
-            progress(Progress::Downloading { done, total })
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-    }
     let (bytes, title) = blocking({
         let (state, slug, id) = (state.clone(), slug.to_string(), id.to_string());
         move || {
@@ -283,4 +304,26 @@ async fn recording(state: &AppState, slug: &str, id: &str, key: &str) -> Result<
     })
     .await
     .map_err(|e| e.1)
+}
+
+#[cfg(test)]
+mod tests {
+    use bowerbird_core::notebook::Notebook;
+
+    use super::*;
+    use crate::tests::test_state;
+
+    #[tokio::test]
+    async fn a_failed_model_download_is_not_kept_against_the_recording() {
+        let (state, library) = test_state("whisper-offline");
+        let mut nb = Notebook::open_or_create(&library.join("talks"), "Talks").unwrap();
+        let source = nb
+            .add_text("In place of a recording", "Some text.")
+            .unwrap();
+        let offline = std::future::ready(Err("Couldn't download the model.".to_string()));
+        transcribe_with(state.clone(), "talks".into(), source.id.clone(), offline).await;
+        assert!(!nb.transcript_failure_path(&source).exists());
+        let job = state.job(&format!("talks/sources/{}", source.id));
+        assert!(matches!(job, Some(Progress::Failed { .. })));
+    }
 }

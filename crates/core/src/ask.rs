@@ -224,8 +224,31 @@ fn status(error: &genai::Error) -> Option<u16> {
             webc_error.status().map(|s| s.as_u16())
         }
         G::HttpError { status, .. } => Some(status.as_u16()),
+        G::WebStream { error, .. } => error.downcast_ref::<genai::Error>().and_then(status),
         _ => None,
     }
+}
+
+/// A provider's own reason for refusing a request, for refusals with no fixed
+/// meaning: some answer 400 to a model name they don't know.
+fn refusal_reason(error: &genai::Error) -> Option<String> {
+    use genai::Error as G;
+    use genai::webc::Error::ResponseFailedStatus as Failed;
+    let body = match error {
+        G::HttpError { body, .. }
+        | G::WebModelCall {
+            webc_error: Failed { body, .. },
+            ..
+        }
+        | G::WebAdapterCall {
+            webc_error: Failed { body, .. },
+            ..
+        } => body,
+        G::WebStream { error, .. } => return refusal_reason(error.downcast_ref()?),
+        _ => return None,
+    };
+    let reply: serde_json::Value = serde_json::from_str(body).ok()?;
+    reply["error"]["message"].as_str().map(str::to_string)
 }
 
 /// A model call that failed on the way, which trying again can fix.
@@ -255,9 +278,18 @@ pub(crate) fn model_error(model: &str, error: genai::Error) -> Error {
         (_, Some(code)) if code >= 500 => {
             format!("{provider} had a problem ({code}). Try again in a moment.")
         }
-        (_, Some(code)) => format!("{provider} refused the request ({code})."),
+        (_, Some(code)) => match refusal_reason(&error) {
+            Some(reason) => format!("{provider} refused the request ({code}): {reason}"),
+            None => format!("{provider} refused the request ({code})."),
+        },
         (G::WebModelCall { .. } | G::WebAdapterCall { .. } | G::WebStream { .. }, None) => {
-            format!("Bowerbird couldn't reach {provider}. Check your internet connection.")
+            if provider == AdapterKind::Ollama.as_str() {
+                format!(
+                    "Ollama isn't answering on this device. “{model}” goes to Ollama because no other provider is named in front of it. To use another provider, put its name in front in Settings, as in groq::model-name."
+                )
+            } else {
+                format!("Bowerbird couldn't reach {provider}. Check your internet connection.")
+            }
         }
         _ => format!("The request to {provider} failed: {error}"),
     };
@@ -728,5 +760,110 @@ mod tests {
                 assert_eq!(provider_name(&format!("{name}:some-model")), name);
             }
         }
+    }
+
+    /// A provider that gives `reply`, as a status and body, to one request.
+    /// Without a reply it closes the connection unanswered.
+    async fn provider(kind: AdapterKind, reply: Option<(&str, &str)>) -> genai::ServiceTarget {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let reply = reply.map(|(status, body)| {
+            format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        });
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut request = [0; 8192];
+            let _ = conn.read(&mut request).await;
+            if let Some(reply) = reply {
+                let _ = conn.write_all(reply.as_bytes()).await;
+            }
+        });
+        genai::ServiceTarget {
+            endpoint: genai::resolver::Endpoint::from_owned(endpoint),
+            auth: AuthData::from_single("key"),
+            model: ModelIden::new(kind, "some-model"),
+        }
+    }
+
+    fn question() -> ChatRequest {
+        ChatRequest::new(vec![ChatMessage::user("hi")])
+    }
+
+    /// The failure of a streamed request, however far it got.
+    async fn stream_failure(target: genai::ServiceTarget) -> genai::Error {
+        let client = client(Arc::default()).unwrap();
+        let mut stream = match client.exec_chat_stream(target, question(), None).await {
+            Ok(response) => response.stream,
+            Err(error) => return error,
+        };
+        while let Some(event) = stream.next().await {
+            if let Err(error) = event {
+                return error;
+            }
+        }
+        panic!("the request should have failed");
+    }
+
+    #[tokio::test]
+    async fn a_refused_stream_says_what_the_provider_refused() {
+        for (status, body, message) in [
+            (
+                "401 Unauthorized",
+                r#"{"error":{"message":"User not found.","code":401}}"#,
+                "OpenRouter rejected the API key. Check it in Settings.",
+            ),
+            (
+                "404 Not Found",
+                r#"{"error":{"message":"No endpoints found.","code":404}}"#,
+                "OpenRouter has no model called “open_router::x”. Check the model name in Settings.",
+            ),
+            (
+                "400 Bad Request",
+                r#"{"error":{"message":"x is not a valid model ID","code":400}}"#,
+                "OpenRouter refused the request (400): x is not a valid model ID",
+            ),
+            (
+                "400 Bad Request",
+                "<html>Bad Request</html>",
+                "OpenRouter refused the request (400).",
+            ),
+        ] {
+            let target = provider(AdapterKind::OpenRouter, Some((status, body))).await;
+            let error = model_error("open_router::x", stream_failure(target).await);
+            assert_eq!(error.to_string(), message);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_request_without_a_stream_gives_the_same_reason() {
+        let body = r#"{"error":{"message":"x is not a valid model ID","code":400}}"#;
+        let target = provider(AdapterKind::OpenRouter, Some(("400 Bad Request", body))).await;
+        let client = client(Arc::default()).unwrap();
+        let failure = client
+            .exec_chat(target, question(), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            model_error("open_router::x", failure).to_string(),
+            "OpenRouter refused the request (400): x is not a valid model ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_request_says_where_to_look() {
+        let target = provider(AdapterKind::OpenRouter, None).await;
+        assert_eq!(
+            model_error("open_router::x", stream_failure(target).await).to_string(),
+            "Bowerbird couldn't reach OpenRouter. Check your internet connection."
+        );
+        let target = provider(AdapterKind::Ollama, None).await;
+        assert_eq!(
+            model_error("vendor/model", stream_failure(target).await).to_string(),
+            "Ollama isn't answering on this device. “vendor/model” goes to Ollama because no other provider is named in front of it. To use another provider, put its name in front in Settings, as in groq::model-name."
+        );
     }
 }

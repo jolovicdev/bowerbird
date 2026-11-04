@@ -391,6 +391,14 @@ fn docx_body(
             .map_err(|e| xml_error("word/document.xml", e))?
         {
             Event::Eof => break,
+            Event::Start(e) | Event::Empty(e) if local(&e) == "docPr" => {
+                alt = attr(&e, "descr").unwrap_or_default();
+            }
+            Event::Start(e) | Event::Empty(e) if local(&e) == "blip" => {
+                if let Some(path) = attr(&e, "embed").and_then(|id| rels.get(&id)) {
+                    blocks.image(path.clone(), std::mem::take(&mut alt));
+                }
+            }
             Event::Start(e) => match local(&e) {
                 "p" => {
                     paragraphs += 1;
@@ -436,12 +444,6 @@ fn docx_body(
                 }
                 "ilvl" if paragraphs == 1 => {
                     list_level = attr(&e, "val").and_then(|v| v.parse().ok());
-                }
-                "docPr" => alt = attr(&e, "descr").unwrap_or_default(),
-                "blip" => {
-                    if let Some(path) = attr(&e, "embed").and_then(|id| rels.get(&id)) {
-                        blocks.image(path.clone(), std::mem::take(&mut alt));
-                    }
                 }
                 "tab" if runs > 0 => blocks.push(" "),
                 "br" | "cr" if runs > 0 => blocks.line_break(),
@@ -799,6 +801,28 @@ pub(crate) mod tests {
         assert_eq!(
             converted.markdown,
             format!("Before\n\n{MARK}0{MARK}\n\nAfter")
+        );
+    }
+
+    #[test]
+    fn word_pictures_with_child_elements_are_marked_too() {
+        let drawing = r#"<w:p><w:r><w:drawing><wp:inline><wp:docPr id="1" name="Picture 1" descr="Map of the Empire"><a:hlinkClick r:id="rId9"/></wp:docPr><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId5" cstate="print"><a:extLst><a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}"><a14:useLocalDpi val="0"/></a:ext></a:extLst></a:blip></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#;
+        let document = format!(
+            r#"<w:document {W} xmlns:wp="wp" xmlns:a="a" xmlns:a14="a14" xmlns:pic="pic" xmlns:r="r"><w:body>{drawing}</w:body></w:document>"#
+        );
+        let rels =
+            r#"<Relationships><Relationship Id="rId5" Target="media/image1.png"/></Relationships>"#;
+        let converted = docx(&package(&[
+            ("word/document.xml", &document),
+            ("word/_rels/document.xml.rels", rels),
+        ]))
+        .unwrap();
+        assert_eq!(
+            converted.images,
+            vec![Image {
+                path: "word/media/image1.png".into(),
+                alt: "Map of the Empire".into()
+            }]
         );
     }
 

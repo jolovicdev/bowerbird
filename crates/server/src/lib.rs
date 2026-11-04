@@ -542,6 +542,27 @@ mod tests {
         assert!(notebook_dir(&library, "birds/../birds").is_err());
     }
 
+    /// A server's state with an empty library, for handlers called directly,
+    /// and the library's path.
+    pub(crate) fn test_state(name: &str) -> (AppState, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("bowerbird-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let library = dir.join("library");
+        std::fs::create_dir_all(&library).unwrap();
+        let state = AppState {
+            library: Arc::new(library.clone()),
+            token: "right-token".into(),
+            locks: Arc::default(),
+            settings: Arc::new(RwLock::new(Settings::default())),
+            settings_path: Arc::new(dir.join("settings.toml")),
+            jobs: Arc::default(),
+            speech: Arc::default(),
+            embedding: Arc::default(),
+            reach: web::Reach::Any,
+        };
+        (state, library)
+    }
+
     fn json_body(response: &str) -> serde_json::Value {
         let body = response.split_once("\r\n\r\n").map_or("", |(_, b)| b);
         serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}: {response}"))

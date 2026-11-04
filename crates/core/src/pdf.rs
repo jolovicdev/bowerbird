@@ -281,11 +281,19 @@ fn assemble(document: &PdfDocument, page_texts: Vec<String>) -> Doc {
     }
 }
 
+/// Most bookmarks read from one PDF. PDFium leaves circular bookmarks to its
+/// caller, so a file whose bookmarks point back at each other ends here.
+const BOOKMARKS_MAX: usize = 10_000;
+
 fn bookmark_sections(document: &PdfDocument, page_starts: &[usize], text: &str) -> Vec<Section> {
     let mut out = Vec::new();
+    let mut left = BOOKMARKS_MAX;
     let mut next = document.bookmarks().root();
     while let Some(bookmark) = next {
-        walk_bookmark(&bookmark, 1, page_starts, text, &mut out);
+        walk_bookmark(&bookmark, 1, page_starts, text, &mut left, &mut out);
+        if left == 0 {
+            break;
+        }
         next = bookmark.next_sibling();
     }
     out
@@ -296,8 +304,10 @@ fn walk_bookmark(
     depth: u8,
     page_starts: &[usize],
     text: &str,
+    left: &mut usize,
     out: &mut Vec<Section>,
 ) {
+    *left = left.saturating_sub(1);
     let title = bookmark.title().unwrap_or_default().trim().to_string();
     let page = bookmark
         .destination()
@@ -329,7 +339,10 @@ fn walk_bookmark(
     }
     let mut child = bookmark.first_child();
     while let Some(c) = child {
-        walk_bookmark(&c, depth + 1, page_starts, text, out);
+        if *left == 0 {
+            return;
+        }
+        walk_bookmark(&c, depth + 1, page_starts, text, left, out);
         child = c.next_sibling();
     }
 }
@@ -739,6 +752,29 @@ mod tests {
         let doc = extract(&write_temp("accent.pdf", &pdf)).unwrap();
         let titles: Vec<_> = doc.sections.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, vec!["Über die Vögel", "Field notes"]);
+    }
+
+    #[test]
+    fn circular_bookmarks_end() {
+        let pdf = build(
+            &[Page {
+                lines: vec![(11.0, 700.0, "Introduction"), (11.0, 680.0, "Methods")],
+            }],
+            &[("Introduction", 0), ("Methods", 0)],
+        );
+        // The same length, so the file's offsets still hold: each bookmark's
+        // next is now the other one.
+        let looped = String::from_utf8(pdf).unwrap().replace("/Prev", "/Next");
+        let path = write_temp("looped.pdf", looped.as_bytes());
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(extract(&path).map(|doc| doc.sections.len()));
+        });
+        let sections = finished
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("the walk should end")
+            .unwrap();
+        assert!(sections >= 2);
     }
 
     #[test]

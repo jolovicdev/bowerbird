@@ -195,7 +195,7 @@ fn valid_id(id: &str) -> bool {
 
 /// A single file name, so joining it to `sources/` can't leave that folder.
 /// Backslashes and colons are refused too: on Windows they separate paths.
-fn plain_file_name(name: &str) -> bool {
+pub fn plain_file_name(name: &str) -> bool {
     let mut parts = Path::new(name).components();
     matches!(
         (parts.next(), parts.next()),

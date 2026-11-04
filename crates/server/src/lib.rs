@@ -322,11 +322,11 @@ async fn blocking<T: Send + 'static>(
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
 }
 
-/// Slugs come from URLs, so only accept what `notebook::slug` produces.
+/// Slugs come from URLs, so only a single name inside the library is accepted.
+/// Any such name will do: a folder someone copied needn't look like a new slug.
 fn notebook_dir(library: &Path, slug: &str) -> ApiResult<PathBuf> {
-    let valid = !slug.is_empty() && slug.chars().all(|c| c.is_alphanumeric() || c == '-');
     let dir = library.join(slug);
-    if valid && dir.join("notebook.toml").exists() {
+    if bowerbird_core::notebook::plain_file_name(slug) && dir.join("notebook.toml").exists() {
         Ok(dir)
     } else {
         Err(ApiError(
@@ -561,6 +561,36 @@ mod tests {
             reach: web::Reach::Any,
         };
         (state, library)
+    }
+
+    #[tokio::test]
+    async fn a_copied_notebook_folder_opens_under_its_own_name() {
+        let addr = serve("copies").await;
+        let t = Some("right-token");
+        call(addr, "POST", "/api/notebooks", t, r#"{"title":"Birds"}"#).await;
+        let library = std::env::temp_dir()
+            .join(format!("bowerbird-copies-{}", std::process::id()))
+            .join("library");
+        for copy in ["birds copy", "birds - Copy (2)"] {
+            for sub in ["sources", "notes", "chats", ".bowerbird"] {
+                std::fs::create_dir_all(library.join(copy).join(sub)).unwrap();
+            }
+            std::fs::copy(
+                library.join("birds/notebook.toml"),
+                library.join(copy).join("notebook.toml"),
+            )
+            .unwrap();
+        }
+        let listed = json_body(&call(addr, "GET", "/api/notebooks", t, "").await);
+        assert_eq!(listed.as_array().unwrap().len(), 3);
+        for path in ["birds%20copy", "birds%20-%20Copy%20(2)"] {
+            let opened = call(addr, "GET", &format!("/api/notebooks/{path}"), t, "").await;
+            assert!(opened.starts_with("HTTP/1.1 200"), "{path}: {opened}");
+        }
+        for path in ["..%2Fbirds", "%2E%2E", "birds%2F..%2Fbirds", "..%5Cbirds"] {
+            let refused = call(addr, "GET", &format!("/api/notebooks/{path}"), t, "").await;
+            assert!(refused.starts_with("HTTP/1.1 404"), "{path}: {refused}");
+        }
     }
 
     fn json_body(response: &str) -> serde_json::Value {

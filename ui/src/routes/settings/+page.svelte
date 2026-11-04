@@ -160,6 +160,9 @@
 						bind:value={model}
 						placeholder={settings.default_model}
 						aria-describedby="model-hint"
+						autocapitalize="none"
+						autocorrect="off"
+						spellcheck="false"
 						oninput={() => (modelSaved = false)}
 					/>
 					<button class="primary" disabled={model.trim() === settings.chat_model}>Save</button>

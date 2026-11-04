@@ -113,7 +113,8 @@ The default model is `deepseek-flash`. Any provider that
 OpenAI, Anthropic, Gemini, DeepSeek, Mistral, Groq, xAI, OpenRouter and
 Ollama. In Settings, enter the model name (prefix it with the provider, as in
 `groq::model-name`, to choose the provider yourself) and paste the provider's
-API key. **Test model and key** sends one short message to check that they
+API key. A name in Ollama's `model:tag` form, such as `deepseek-r1:7b`, stays
+with Ollama. **Test model and key** sends one short message to check that they
 work, and shows the provider's reason when they don't.
 
 Keys are saved in `settings.toml`, readable only by your user account:

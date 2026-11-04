@@ -171,7 +171,7 @@ pub fn client(settings: SharedSettings) -> Result<genai::Client> {
         .with_reqwest(http)
         .with_auth_resolver(resolver)
         .with_model_mapper_fn(|iden: ModelIden| {
-            Ok(match provider_in_front(&iden.model_name) {
+            Ok(match provider_named(&iden.model_name) {
                 Some((kind, name)) => {
                     ModelIden::new(kind, format!("{}::{name}", kind.as_lower_str()))
                 }
@@ -182,12 +182,14 @@ pub fn client(settings: SharedSettings) -> Result<genai::Client> {
         .map_err(|e| Error::Model(e.to_string()))
 }
 
-/// The provider written in front of a model name, as `provider::name` or
-/// `provider:name`. genai reads only its own spelling, `open_router::name`, and
-/// sends anything it doesn't recognize to Ollama, so this also takes a provider
-/// as Settings lists it, in any case.
-fn provider_in_front(model: &str) -> Option<(AdapterKind, &str)> {
-    let (front, name) = model.split_once("::").or_else(|| model.split_once(':'))?;
+/// The provider a model name with a colon asks for: `provider::name`,
+/// `provider:name`, or Ollama for its own `name:tag`. genai reads only its own
+/// spelling, `open_router::name`, and picks by how a name starts, which would
+/// send the local `deepseek-r1:7b` to DeepSeek. So this also takes a provider
+/// as Settings lists it, in any case, and keeps tagged names local.
+fn provider_named(model: &str) -> Option<(AdapterKind, &str)> {
+    let two_colons = model.split_once("::");
+    let (front, name) = two_colons.or_else(|| model.split_once(':'))?;
     let letters = |text: &str| -> String {
         text.chars()
             .filter(char::is_ascii_alphanumeric)
@@ -195,21 +197,22 @@ fn provider_in_front(model: &str) -> Option<(AdapterKind, &str)> {
             .collect()
     };
     let front = letters(front);
-    let kind = *AdapterKind::all()
+    let kind = AdapterKind::all()
         .iter()
-        .find(|kind| letters(kind.as_lower_str()) == front)?;
-    // One colon also separates an Ollama model from its tag. Of the providers,
-    // only `mistral` is a model in Ollama's library; a local model named after
-    // another provider needs `ollama::` in front.
-    if kind == AdapterKind::Mistral && !model.contains("::") {
-        return None;
+        .find(|kind| letters(kind.as_lower_str()) == front);
+    match kind {
+        // Of the providers, only `mistral` is a model in Ollama's library; a
+        // local model named after another provider needs `ollama::` in front.
+        Some(AdapterKind::Mistral) if two_colons.is_none() => Some((AdapterKind::Ollama, model)),
+        Some(kind) => Some((*kind, name.trim())),
+        None if two_colons.is_none() => Some((AdapterKind::Ollama, model)),
+        None => None,
     }
-    Some((kind, name.trim()))
 }
 
 /// The provider's display name for a model id, e.g. "DeepSeek".
 pub fn provider_name(model: &str) -> &'static str {
-    provider_in_front(model)
+    provider_named(model)
         .map(|(kind, _)| kind)
         .or_else(|| AdapterKind::from_model(model).ok())
         .map_or("the model provider", |k| k.as_str())
@@ -761,6 +764,8 @@ mod tests {
             // A model and its tag, in Ollama's naming.
             ("llama3:8b", Ollama, "llama3:8b"),
             ("mistral:7b", Ollama, "mistral:7b"),
+            ("deepseek-r1:7b", Ollama, "deepseek-r1:7b"),
+            ("command-r:35b", Ollama, "command-r:35b"),
             ("Mistral:7b", Ollama, "Mistral:7b"),
             ("hf.co/user/model:Q4", Ollama, "hf.co/user/model:Q4"),
             ("Ollama:llama3:8b", Ollama, "llama3:8b"),

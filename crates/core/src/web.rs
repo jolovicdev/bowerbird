@@ -79,6 +79,11 @@ fn charset_in(text: &str) -> Option<&str> {
         .filter(|label| !label.is_empty())
 }
 
+/// Whether `url` is an http or https address.
+pub fn is_web_address(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
+}
+
 /// Last path segment of a URL, as a fallback title for a linked file.
 pub fn file_name(url: &str) -> String {
     reqwest::Url::parse(url)

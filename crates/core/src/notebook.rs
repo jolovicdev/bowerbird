@@ -262,11 +262,17 @@ impl Notebook {
                 bad.title
             )));
         }
+        let mut sources = file.sources;
+        // Shown as a link, so a notebook from someone else can't choose what
+        // following it starts.
+        for source in &mut sources {
+            source.url.take_if(|url| !web::is_web_address(url));
+        }
         Ok(Notebook {
             dir: dir.to_path_buf(),
             title: file.title,
             chat: file.chat,
-            sources: file.sources,
+            sources,
         })
     }
 
@@ -913,6 +919,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(Notebook::open(&nb.dir).unwrap().sources.len(), 1);
+    }
+
+    #[test]
+    fn a_source_keeps_only_a_web_address() {
+        let dir = std::env::temp_dir().join(format!("bowerbird-address-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let nb = Notebook::open_or_create(&dir, "Birds").unwrap();
+        for (url, kept) in [
+            ("https://example.org/bowers", true),
+            ("http://example.org/bowers", true),
+            ("ms-msdt:/id PCWDiagnostic", false),
+            ("javascript:alert(1)", false),
+            ("file:///etc/passwd", false),
+            ("not an address", false),
+        ] {
+            std::fs::write(
+                dir.join("notebook.toml"),
+                format!(
+                    "title = \"Birds\"\n\n[[source]]\nid = \"a1b2c3d4e5f6\"\ntitle = \"T\"\nkind = \"web\"\nfile = \"a1b2c3d4e5f6.html\"\nletter = \"A\"\ncolor = 0\nurl = '{url}'\n"
+                ),
+            )
+            .unwrap();
+            let source = Notebook::open(&nb.dir).unwrap().sources.remove(0);
+            assert_eq!(source.url.is_some(), kept, "{url}");
+        }
     }
 
     #[cfg(unix)]

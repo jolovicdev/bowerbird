@@ -12,7 +12,10 @@ the steps or files that show the problem. Fixes ship in the next release.
 - **Notebooks from someone else.** A notebook is a folder that can be copied
   between people. Bowerbird opens one only when every source it names is a
   file inside the folder and nothing in the folder is a symbolic link, so a
-  notebook can't make it read, write or delete files elsewhere.
+  notebook can't make it read, write or delete files elsewhere. A source's
+  address counts only if it is http or https, and the desktop app hands the
+  system only http, https and mailto links, so a notebook can't make a link
+  start another program.
 - **The server on a network.** Every API request needs the token the server
   prints at startup. Links added through the server reach only the public
   internet unless it runs with `--allow-private-links`, so a token holder

@@ -93,6 +93,12 @@ pub fn file_name(url: &str) -> String {
 }
 
 pub async fn fetch(url: &str, reach: Reach) -> Result<Page> {
+    fetch_within(url, reach, TIMEOUT).await
+}
+
+/// `patience` is how long connecting, or waiting for more bytes, may take. The
+/// whole download has no limit: a large file over a slow line takes its time.
+async fn fetch_within(url: &str, reach: Reach, patience: Duration) -> Result<Page> {
     if let Some(id) = youtube::video_id(url) {
         return Ok(Page {
             content_type: String::new(),
@@ -104,7 +110,8 @@ pub async fn fetch(url: &str, reach: Reach) -> Result<Page> {
         return Err(Error::Http(private_message(&host(url))));
     }
     let client = client(reach)
-        .timeout(TIMEOUT)
+        .connect_timeout(patience)
+        .read_timeout(patience)
         .build()
         .map_err(|e| Error::Http(e.to_string()))?;
     let response = crate::retry::with_retries(
@@ -1001,6 +1008,49 @@ mod tests {
         let utf8 = "<p>Der Müller</p>".as_bytes();
         assert!(html("text/html", utf8).contains("Müller"));
         assert!(html("text/html; charset=nonsense", utf8).contains("Müller"));
+    }
+
+    /// A server on a free loopback port sending `pieces` of a page, each `gap`
+    /// after the last. It then closes the connection, or if `stall`, stays silent.
+    async fn serve_slowly(gap: Duration, pieces: usize, stall: bool) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = [0; 4096];
+                    let _ = stream.read(&mut request).await;
+                    let head =
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n";
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    for _ in 0..pieces {
+                        tokio::time::sleep(gap).await;
+                        let _ = stream.write_all(b"<p>more</p>").await;
+                    }
+                    if stall {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_download_lasts_while_bytes_keep_coming_and_stops_when_they_stop() {
+        let patience = Duration::from_millis(1500);
+        let steady = serve_slowly(Duration::from_millis(400), 6, false).await;
+        let url = format!("http://127.0.0.1:{steady}/");
+        let page = fetch_within(&url, Reach::Any, patience).await.unwrap();
+        assert_eq!(page.bytes.len(), 6 * "<p>more</p>".len());
+
+        let stalled = serve_slowly(Duration::ZERO, 1, true).await;
+        let url = format!("http://127.0.0.1:{stalled}/");
+        let error = fetch_within(&url, Reach::Any, patience)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("took longer"), "{error}");
     }
 
     #[tokio::test]

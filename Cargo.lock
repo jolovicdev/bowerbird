@@ -512,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "bowerbird"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bowerbird-core",
  "clap",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "bowerbird-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "dom_smoothie",
  "encoding_rs",
@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "bowerbird-desktop"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "axum",
  "bowerbird-core",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "bowerbird-server"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "axum",
  "bowerbird-core",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "bowerbird-speech"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bowerbird-core",
  "loqui-g2p",

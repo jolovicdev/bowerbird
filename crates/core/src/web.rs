@@ -310,7 +310,12 @@ pub async fn fetch_images(
     page_url: &str,
     reach: Reach,
 ) -> Vec<(String, &'static str, Vec<u8>)> {
-    let (Ok(public), Ok(any)) = (client(Reach::Public).build(), client(Reach::Any).build()) else {
+    let (Ok(public), Ok(any)) = (
+        client(Reach::Public).build(),
+        client(Reach::Any)
+            .redirect(reqwest::redirect::Policy::none())
+            .build(),
+    ) else {
         return Vec::new();
     };
     let page_host = reqwest::Url::parse(page_url)
@@ -319,21 +324,11 @@ pub async fn fetch_images(
     let deadline = tokio::time::Instant::now() + IMAGES_TIME;
     futures::stream::iter(srcs.iter().take(IMAGES_MAX).cloned())
         .map(|src| {
-            let same_host = page_host.is_some()
-                && reqwest::Url::parse(&src)
-                    .ok()
-                    .is_some_and(|u| u.host_str() == page_host.as_deref());
-            let reach = if same_host { reach } else { Reach::Public };
-            let client = if reach == Reach::Any { &any } else { &public }.clone();
+            let own_host = page_host.clone().filter(|_| reach == Reach::Any);
+            let (public, any) = (public.clone(), any.clone());
             let fetch = async move {
-                if !host_allowed(&src, reach) {
-                    return None;
-                }
-                let response = client
-                    .get(&src)
-                    .send()
-                    .await
-                    .ok()?
+                let response = picture_response(&src, own_host.as_deref(), &public, &any)
+                    .await?
                     .error_for_status()
                     .ok()?;
                 let kind = response
@@ -366,6 +361,36 @@ pub async fn fetch_images(
         .filter_map(std::future::ready)
         .collect()
         .await
+}
+
+/// Most redirects followed for one picture on its page's own host.
+const IMAGE_REDIRECTS_MAX: usize = 10;
+
+/// Requests a picture. Only `own_host` may be off the public internet: `any`
+/// follows no redirects, so each is looked at here, and one leaving that host
+/// goes through `public`, which checks the rest of the way.
+async fn picture_response(
+    src: &str,
+    own_host: Option<&str>,
+    public: &reqwest::Client,
+    any: &reqwest::Client,
+) -> Option<reqwest::Response> {
+    let mut url = reqwest::Url::parse(src).ok()?;
+    for _ in 0..IMAGE_REDIRECTS_MAX {
+        if url.host_str().is_none() || url.host_str() != own_host {
+            if !host_allowed(url.as_str(), Reach::Public) {
+                return None;
+            }
+            return public.get(url).send().await.ok();
+        }
+        let response = any.get(url.clone()).send().await.ok()?;
+        if !response.status().is_redirection() {
+            return Some(response);
+        }
+        let location = response.headers().get(reqwest::header::LOCATION)?;
+        url = url.join(location.to_str().ok()?).ok()?;
+    }
+    None
 }
 
 fn host(url: &str) -> String {
@@ -1056,6 +1081,40 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("took longer"), "{error}");
+    }
+
+    /// A server on a free loopback port redirecting every request to `to`.
+    async fn redirect_to(to: String) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).await;
+                let head = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(head.as_bytes()).await;
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn a_picture_can_t_redirect_off_the_page_s_own_host_to_a_private_address() {
+        let elsewhere = serve("image/png", b"not really a png".to_vec()).await;
+        // `localhost` is another host than the page's `127.0.0.1`.
+        let away = redirect_to(format!("http://localhost:{elsewhere}/plate.png")).await;
+        let src = vec![format!("http://127.0.0.1:{away}/plate.png")];
+        let page = format!("http://127.0.0.1:{away}/bowers.html");
+        assert!(fetch_images(&src, &page, Reach::Any).await.is_empty());
+
+        let nearby = redirect_to(format!("http://127.0.0.1:{elsewhere}/plate.png")).await;
+        let src = vec![format!("http://127.0.0.1:{nearby}/plate.png")];
+        let page = format!("http://127.0.0.1:{nearby}/bowers.html");
+        let saved = fetch_images(&src, &page, Reach::Any).await;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0, src[0]);
     }
 
     #[tokio::test]

@@ -170,13 +170,49 @@ pub fn client(settings: SharedSettings) -> Result<genai::Client> {
     genai::Client::builder()
         .with_reqwest(http)
         .with_auth_resolver(resolver)
+        .with_model_mapper_fn(|iden: ModelIden| {
+            Ok(match provider_in_front(&iden.model_name) {
+                Some((kind, name)) => {
+                    ModelIden::new(kind, format!("{}::{name}", kind.as_lower_str()))
+                }
+                None => iden,
+            })
+        })
         .build()
         .map_err(|e| Error::Model(e.to_string()))
 }
 
+/// The provider written in front of a model name, as `provider::name` or
+/// `provider:name`. genai reads only its own spelling, `open_router::name`, and
+/// sends anything it doesn't recognize to Ollama, so this also takes a provider
+/// as Settings lists it, in any case.
+fn provider_in_front(model: &str) -> Option<(AdapterKind, &str)> {
+    let (front, name) = model.split_once("::").or_else(|| model.split_once(':'))?;
+    let letters = |text: &str| -> String {
+        text.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let front = letters(front);
+    let kind = *AdapterKind::all()
+        .iter()
+        .find(|kind| letters(kind.as_lower_str()) == front)?;
+    // One colon also separates an Ollama model from its tag. Of the providers,
+    // only `mistral` is a model in Ollama's library; a local model named after
+    // another provider needs `ollama::` in front.
+    if kind == AdapterKind::Mistral && !model.contains("::") {
+        return None;
+    }
+    Some((kind, name.trim()))
+}
+
 /// The provider's display name for a model id, e.g. "DeepSeek".
 pub fn provider_name(model: &str) -> &'static str {
-    AdapterKind::from_model(model).map_or("the model provider", |k| k.as_str())
+    provider_in_front(model)
+        .map(|(kind, _)| kind)
+        .or_else(|| AdapterKind::from_model(model).ok())
+        .map_or("the model provider", |k| k.as_str())
 }
 
 /// Turns a model-call failure into a sentence that says what went wrong and
@@ -632,5 +668,65 @@ mod tests {
         let ctx = retrieve::gather_overview(&index, &nb).unwrap();
         let text = prompt(&index, &nb, &ctx, "What is the exam tip?").unwrap();
         assert!(text.contains("switched these sources off") && text.contains("B. Lecture notes"));
+    }
+
+    #[tokio::test]
+    async fn a_model_name_reaches_the_provider_it_asks_for() {
+        use AdapterKind::{BedrockApi, DeepSeek, Mistral, Ollama, OpenRouter, Zai};
+        // Each key's value is its own variable, to show which key a provider gets.
+        let keys = crate::settings::providers()
+            .into_iter()
+            .map(|(_, env)| (env.to_string(), env.to_string()))
+            .collect();
+        let settings = Settings {
+            keys,
+            ..Default::default()
+        };
+        let client = client(Arc::new(RwLock::new(settings))).unwrap();
+        for (typed, kind, model) in [
+            ("Openrouter:inkling", OpenRouter, "inkling"),
+            ("Openrouter::inkling", OpenRouter, "inkling"),
+            ("openrouter::inkling", OpenRouter, "inkling"),
+            ("Open Router: inkling", OpenRouter, "inkling"),
+            ("open_router:inkling", OpenRouter, "inkling"),
+            ("open_router::inkling", OpenRouter, "inkling"),
+            ("OpenRouter:org/model:free", OpenRouter, "org/model:free"),
+            ("Deepseek:deepseek-flash", DeepSeek, "deepseek-flash"),
+            ("Mistral::large", Mistral, "large"),
+            // A model and its tag, in Ollama's naming.
+            ("llama3:8b", Ollama, "llama3:8b"),
+            ("mistral:7b", Ollama, "mistral:7b"),
+            ("Mistral:7b", Ollama, "Mistral:7b"),
+            ("hf.co/user/model:Q4", Ollama, "hf.co/user/model:Q4"),
+            ("Ollama:llama3:8b", Ollama, "llama3:8b"),
+            ("ollama::llama3:8b", Ollama, "llama3:8b"),
+            // Names genai routes by itself.
+            ("deepseek-flash", DeepSeek, "deepseek-flash"),
+            ("mistral::large", Mistral, "large"),
+            ("bedrock_api::claude-v1:0", BedrockApi, "claude-v1:0"),
+            ("zai_coding::glm-4.6", Zai, "glm-4.6"),
+        ] {
+            let target = client.resolve_service_target(typed).await.unwrap();
+            assert_eq!(target.model.adapter_kind, kind, "{typed}");
+            assert_eq!(
+                target.model.model_name.namespace_and_name().1,
+                model,
+                "{typed}"
+            );
+            if let Some(env) = kind.default_key_env_name() {
+                assert_eq!(target.auth.single_key_value().unwrap(), env, "{typed}");
+            }
+            assert_eq!(provider_name(typed), kind.as_str(), "{typed}");
+        }
+    }
+
+    #[test]
+    fn every_provider_can_go_in_front_as_settings_lists_it() {
+        for (name, _) in crate::settings::providers() {
+            assert_eq!(provider_name(&format!("{name}::some-model")), name);
+            if name != AdapterKind::Mistral.as_str() {
+                assert_eq!(provider_name(&format!("{name}:some-model")), name);
+            }
+        }
     }
 }

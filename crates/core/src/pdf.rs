@@ -464,7 +464,9 @@ fn font_size_sections(
         else {
             continue;
         };
-        cursor = (c.page, at + 1);
+        // Past the heading's first character, which may take several bytes.
+        let first = page_text[at..].chars().next().map_or(1, char::len_utf8);
+        cursor = (c.page, at + first);
         sections.push(Section {
             title,
             depth: depth as u8 + 1,
@@ -717,6 +719,26 @@ mod tests {
             doc.text[field_notes.start..].starts_with("Field notes"),
             "heading must start its own line"
         );
+    }
+
+    #[test]
+    fn a_heading_starting_with_an_accent_lets_the_next_one_be_found() {
+        let body = "Bowerbirds sort their finds into piles by color on a mat of moss.";
+        let pdf = build(
+            &[Page {
+                lines: vec![
+                    (20.0, 700.0, "\\334ber die V\\366gel"),
+                    (10.0, 670.0, body),
+                    (10.0, 655.0, body),
+                    (20.0, 625.0, "Field notes"),
+                    (10.0, 595.0, body),
+                ],
+            }],
+            &[],
+        );
+        let doc = extract(&write_temp("accent.pdf", &pdf)).unwrap();
+        let titles: Vec<_> = doc.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, vec!["Über die Vögel", "Field notes"]);
     }
 
     #[test]

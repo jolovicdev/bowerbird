@@ -349,6 +349,13 @@ test('a failed model download reads as the problem it is', async ({ page }) => {
 	);
 });
 
+test('a notebook folder copied under another name links with its name encoded', async ({ page }) => {
+	const copy = { slug: 'birds copy #2', title: 'Birds copy', sources: [], updated: 0 };
+	await page.route('**/api/notebooks', (route) => route.fulfill({ json: [copy] }));
+	await page.goto('/#token=e2e');
+	await expect(page.getByRole('link', { name: /Birds copy/ })).toHaveAttribute('href', '/n/birds%20copy%20%232');
+});
+
 test("adds the files it can and names each one it can't", async ({ page }) => {
 	const dir = mkdtempSync(join(tmpdir(), 'bowerbird-batch-'));
 	const big = join(dir, 'atlas.pdf');

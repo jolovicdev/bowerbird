@@ -89,7 +89,7 @@
 			<ul class="list">
 				{#each notebooks as nb (nb.slug)}
 					<li>
-						<a href="/n/{nb.slug}">
+						<a href="/n/{encodeURIComponent(nb.slug)}">
 							<span class="entry">
 								<span class="title">{nb.title}</span>
 								<span class="leader" aria-hidden="true"></span>

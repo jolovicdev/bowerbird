@@ -229,8 +229,9 @@ fn status(error: &genai::Error) -> Option<u16> {
     }
 }
 
-/// A provider's own reason for refusing a request, for refusals with no fixed
-/// meaning: some answer 400 to a model name they don't know.
+/// A provider's own reason for refusing a request. A status alone can mislead:
+/// OpenRouter answers 403 to a moderation flag or a spent budget, and some
+/// providers answer 400 to a model name they don't know.
 fn refusal_reason(error: &genai::Error) -> Option<String> {
     use genai::Error as G;
     use genai::webc::Error::ResponseFailedStatus as Failed;
@@ -264,12 +265,13 @@ pub(crate) fn model_error(model: &str, error: genai::Error) -> Error {
     use genai::Error as G;
     let provider = provider_name(model);
     let status = status(&error);
+    let reason = refusal_reason(&error);
     let message = match (&error, status) {
         (G::Resolver { .. } | G::RequiresApiKey { .. } | G::NoAuthData { .. }, _) => {
             format!("No API key for {provider}. Add one in Settings.")
         }
-        (_, Some(401 | 403)) => format!("{provider} rejected the API key. Check it in Settings."),
-        (_, Some(404)) => {
+        (_, Some(401)) => format!("{provider} rejected the API key. Check it in Settings."),
+        (_, Some(404)) if reason.is_none() => {
             format!("{provider} has no model called “{model}”. Check the model name in Settings.")
         }
         (_, Some(429)) => {
@@ -278,7 +280,7 @@ pub(crate) fn model_error(model: &str, error: genai::Error) -> Error {
         (_, Some(code)) if code >= 500 => {
             format!("{provider} had a problem ({code}). Try again in a moment.")
         }
-        (_, Some(code)) => match refusal_reason(&error) {
+        (_, Some(code)) => match reason {
             Some(reason) => format!("{provider} refused the request ({code}): {reason}"),
             None => format!("{provider} refused the request ({code})."),
         },
@@ -817,8 +819,28 @@ mod tests {
                 "OpenRouter rejected the API key. Check it in Settings.",
             ),
             (
+                "402 Payment Required",
+                r#"{"error":{"message":"Insufficient credits","code":402}}"#,
+                "OpenRouter refused the request (402): Insufficient credits",
+            ),
+            (
+                "403 Forbidden",
+                r#"{"error":{"message":"Your input was flagged","code":403}}"#,
+                "OpenRouter refused the request (403): Your input was flagged",
+            ),
+            (
+                "403 Forbidden",
+                "<html>Blocked</html>",
+                "OpenRouter refused the request (403).",
+            ),
+            (
                 "404 Not Found",
                 r#"{"error":{"message":"No endpoints found.","code":404}}"#,
+                "OpenRouter refused the request (404): No endpoints found.",
+            ),
+            (
+                "404 Not Found",
+                r#"{"error":"model not found"}"#,
                 "OpenRouter has no model called “open_router::x”. Check the model name in Settings.",
             ),
             (

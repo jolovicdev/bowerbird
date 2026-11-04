@@ -138,6 +138,10 @@ async fn run_ask(
             question.clone(),
         );
         blocking(move || {
+            // Before opening: the sync below drops what the opened notebook
+            // doesn't list, such as a source added while waiting for the lock.
+            let lock = state.lock_for(&slug);
+            let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
             let dir = notebook_dir(&state.library, &slug)?;
             let nb = Notebook::open(&dir)?;
             let chat = chat.unwrap_or_else(|| nb.new_item_id("chats", "jsonl"));
@@ -148,8 +152,6 @@ async fn run_ask(
                 .collect();
             let search =
                 retrieve::search_text(&question, history.last().map(|e| e.question.as_str()));
-            let lock = state.lock_for(&slug);
-            let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
             let (index, _) = Index::open_synced(&nb)?;
             let foreign = retrieve::foreign_question(&index, &nb, &search)?;
             if !deep {
@@ -375,4 +377,52 @@ pub(crate) async fn delete_chat(
         Ok(StatusCode::NO_CONTENT)
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::tests::test_state;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_question_waiting_for_the_notebook_keeps_what_was_added_meanwhile() {
+        let (state, library) = test_state("ask-race");
+        let mut nb = Notebook::open_or_create(&library.join("history"), "History").unwrap();
+        nb.add_text("Westphalia", "The Peace of Westphalia was signed in 1648.")
+            .unwrap();
+        Index::open_synced(&nb).unwrap();
+        // The question arrives during a slow upload, which holds the lock.
+        let lock = state.lock_for("history");
+        let guard = lock.lock().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let asking = tokio::spawn(run_ask(
+            state.clone(),
+            "history".to_string(),
+            Question {
+                question: "When was the peace signed?".to_string(),
+                deep: false,
+                model: Some("heabsy::some-model".to_string()),
+                chat: None,
+            },
+            Instant::now(),
+            tx,
+        ));
+        std::thread::sleep(Duration::from_millis(200));
+        // The upload indexes its source, whose vectors took time to make.
+        nb.add_text("Augsburg", "The Peace of Augsburg came earlier, in 1555.")
+            .unwrap();
+        let (mut index, _) = Index::open_synced(&nb).unwrap();
+        let rows = index.unembedded(100).unwrap();
+        index
+            .store_vectors(&rows, &vec![vec![0.0; 4]; rows.len()])
+            .unwrap();
+        let vectors = index.vector_count().unwrap();
+        drop(guard);
+        // It stops at the model, which has no key here.
+        let _ = asking.await;
+        let index = Index::open(&nb.index_path()).unwrap();
+        assert_eq!(index.vector_count().unwrap(), vectors);
+    }
 }

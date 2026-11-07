@@ -12,7 +12,7 @@ encoding_rs = "0.8"
 # ort versions can't link into one binary.
 fastembed = { version = "=7.1.1", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 futures = "0.3"
-genai = "=0.7.2"
+genai = "=0.7.3"
 oar-ocr = { version = "0.10", default-features = false, features = ["simd"] }
 pdfium-render = { version = "0.9", default-features = false, features = ["pdfium_latest", "thread_safe"] }
 quick-xml = { version = "0.42", features = ["escape-html"] }

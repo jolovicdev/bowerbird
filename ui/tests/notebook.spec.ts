@@ -450,3 +450,17 @@ test('tests the model and key from Settings and shows what the provider says', a
 	await expect(testButton).toBeDisabled();
 	await expect(page.getByRole('alert')).toHaveCount(0);
 });
+
+test('signs in with the password and stays signed in without the token link', async ({ page, context }) => {
+	await page.goto('/');
+	await expect(page.getByLabel('Password')).toBeFocused();
+	await page.getByLabel('Password').fill('wrong password');
+	await page.getByRole('button', { name: 'Sign in' }).click();
+	await expect(page.getByRole('alert')).toHaveText('Wrong password.');
+	await page.getByLabel('Password').fill('e2e');
+	await page.getByRole('button', { name: 'Sign in' }).click();
+	await expect(page.getByRole('button', { name: 'New notebook' })).toBeVisible();
+	const tab = await context.newPage();
+	await tab.goto('/settings');
+	await expect(tab.getByLabel('Model for answers')).toBeVisible();
+});

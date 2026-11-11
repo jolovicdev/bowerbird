@@ -15,6 +15,7 @@
 		error = null,
 		stopped = false,
 		reading = null,
+		thinking = false,
 		since = 0,
 		onopen,
 		onretry,
@@ -37,6 +38,8 @@
 		stopped?: boolean;
 		/** Passages the live answer is written from, once the server says. */
 		reading?: Reading | null;
+		/** The model is reasoning, which it does before it writes. */
+		thinking?: boolean;
 		/** When the live question was sent, in milliseconds since the epoch. */
 		since?: number;
 		onopen: (citations: Citation[], el: HTMLElement) => void;
@@ -129,6 +132,8 @@
 			<span class="dot" aria-hidden="true"></span>
 			{#if turn.pieces.length}
 				Writing, {elapsed} s
+			{:else if thinking}
+				Thinking, {elapsed} s
 			{:else if reading}
 				Reading {reading.count === 1 ? '1 passage' : `${reading.count} passages`} from {list(reading.sources)}, {elapsed} s
 			{:else}

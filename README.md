@@ -47,8 +47,8 @@ check for updates. This is everything that goes out:
 | A short test message, with nothing from your notebooks | The model provider you choose | Each time you press Test model and key in Settings |
 
 API keys go only to their own provider. Choose an
-[Ollama](https://ollama.com) model running on your machine, and questions and
-passages stay there too.
+[Ollama](https://ollama.com) model running on your machine, or a model on a
+server of your own, and questions and passages go nowhere else.
 
 ## What it does
 
@@ -113,9 +113,18 @@ The default model is `deepseek-flash`. Any provider that
 OpenAI, Anthropic, Gemini, DeepSeek, Mistral, Groq, xAI, OpenRouter and
 Ollama. In Settings, enter the model name (prefix it with the provider, as in
 `groq::model-name`, to choose the provider yourself) and paste the provider's
-API key. A name in Ollama's `model:tag` form, such as `deepseek-r1:7b`, stays
+API key. A name in Ollama's `model:tag` form, such as `qwen3.8:27b`, stays
 with Ollama. **Test model and key** sends one short message to check that they
 work, and shows the provider's reason when they don't.
+
+To use a model server on another computer, such as Ollama, LM Studio or
+llama.cpp, enter its address under **Your own server** in Settings, for
+example `http://192.168.1.20:11434`. The models that would go to Ollama on this
+device go there instead, through the OpenAI-compatible API these servers offer
+at `/v1`: names no cloud provider uses, and any name with `ollama::` in front. This is how the phone app uses local models. Each of these servers
+listens only on its own computer until told otherwise: start Ollama with
+`OLLAMA_HOST=0.0.0.0`, turn on **Serve on Local Network** in LM Studio, or give
+`llama-server` the option `--host 0.0.0.0`.
 
 Keys are saved in `settings.toml`, readable only by your user account:
 `~/.config/bowerbird/` on Linux and macOS, `%APPDATA%\bowerbird\` on Windows,

@@ -20,7 +20,19 @@
 			if (clean) location.replace(clean);
 		};
 		addEventListener('hashchange', tokenFromHash);
-		return () => removeEventListener('hashchange', tokenFromHash);
+		// Links that open outside the app go to Android's browser in the phone app.
+		const android = window.BowerbirdAndroid;
+		const openOutside = (event: MouseEvent) => {
+			const link = (event.target as Element).closest?.('a[target="_blank"]');
+			if (!android || !(link instanceof HTMLAnchorElement)) return;
+			event.preventDefault();
+			android.openLink(link.href);
+		};
+		addEventListener('click', openOutside);
+		return () => {
+			removeEventListener('hashchange', tokenFromHash);
+			removeEventListener('click', openOutside);
+		};
 	});
 </script>
 

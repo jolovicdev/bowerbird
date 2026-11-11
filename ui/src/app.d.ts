@@ -9,6 +9,10 @@ declare global {
 			contents?: boolean;
 		}
 	}
+	interface Window {
+		/** The phone app's bridge to Android; absent in browsers and on desktops. */
+		BowerbirdAndroid?: { openLink(url: string): void; askForLocalNetwork(): void };
+	}
 }
 
 export {};

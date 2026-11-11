@@ -14,6 +14,10 @@
 	let tested = $state<string | null>(null);
 	let testError = $state<string | null>(null);
 
+	let server = $state('');
+	let serverSaved = $state(false);
+	let serverError = $state<string | null>(null);
+
 	let backend = $state<SearchBackend>('duckduckgo');
 	let searxng = $state('');
 	let searchSaved = $state(false);
@@ -27,6 +31,7 @@
 		try {
 			settings = await api.settings();
 			model = settings.chat_model;
+			server = settings.model_server ?? '';
 			backend = settings.search.backend;
 			searxng = settings.search.searxng_url ?? '';
 		} catch (e) {
@@ -52,6 +57,21 @@
 			modelSaved = true;
 		} catch (e) {
 			modelError = describe(e);
+		}
+	}
+
+	async function saveServer(event: SubmitEvent) {
+		event.preventDefault();
+		serverSaved = false;
+		serverError = null;
+		forgetTest();
+		try {
+			settings = await api.saveSettings({ model_server: server.trim() });
+			server = settings.model_server ?? '';
+			serverSaved = true;
+			if (server) window.BowerbirdAndroid?.askForLocalNetwork();
+		} catch (e) {
+			serverError = describe(e);
 		}
 	}
 
@@ -217,6 +237,34 @@
 			</form>
 		</section>
 
+		<section aria-labelledby="server-heading">
+			<h2 id="server-heading">Your own server</h2>
+			<form class="model" onsubmit={saveServer}>
+				<label for="model-server">Server address</label>
+				<div class="inline">
+					<input
+						id="model-server"
+						bind:value={server}
+						placeholder="http://192.168.1.20:11434"
+						aria-describedby="server-hint"
+						inputmode="url"
+						autocapitalize="none"
+						autocorrect="off"
+						spellcheck="false"
+						oninput={() => (serverSaved = false)}
+					/>
+					<button class="primary" disabled={server.trim() === (settings.model_server ?? '')}>Save</button>
+				</div>
+				<p class="hint" id="server-hint">
+					Ollama on another computer, LM Studio, llama.cpp, or any server with an OpenAI-compatible API. The models that
+					would go to Ollama on this device go there instead: names no cloud provider uses, and any name with
+					<code>ollama::</code> in front. Leave it empty to use Ollama here.
+				</p>
+				{#if serverSaved}<p class="hint" role="status">Saved.</p>{/if}
+				{#if serverError}<p class="problem" role="alert">{serverError}</p>{/if}
+			</form>
+		</section>
+
 		<section aria-labelledby="search-heading">
 			<h2 id="search-heading">Web search</h2>
 			<p class="hint">Used by Find sources on the web, in Add sources.</p>
@@ -269,7 +317,7 @@
 		padding: 0 0 6rem;
 	}
 	nav {
-		margin-bottom: 4rem;
+		margin-bottom: 2.5rem;
 		padding: 1rem 0 0.7rem;
 		border-bottom: 1px solid var(--line);
 		font-size: var(--t-xs);
@@ -286,7 +334,7 @@
 		color: var(--ink);
 	}
 	h1 {
-		margin: 0 0 3rem;
+		margin: 0 0 1.75rem;
 		font-size: var(--t-display);
 		font-weight: 500;
 		font-variation-settings: 'opsz' 72;
@@ -294,14 +342,14 @@
 		letter-spacing: -0.015em;
 	}
 	h2 {
-		margin: 0 0 0.75rem;
+		margin: 0 0 0.4rem;
 		font-size: var(--t-xl);
 		font-style: italic;
 		font-weight: 400;
 		font-variation-settings: 'opsz' 48;
 	}
 	section + section {
-		margin-top: 3rem;
+		margin-top: 2rem;
 	}
 	label {
 		display: block;

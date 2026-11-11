@@ -177,6 +177,7 @@ export type Settings = {
 	search: SearchSettings;
 	/** Search services that take a key. */
 	search_keys: Provider[];
+	model_server: string | null;
 };
 
 /** A web page found for a research question. */
@@ -349,7 +350,12 @@ export const api = {
 	renameSource: (slug: string, id: string, title: string) => send<Notebook>('PATCH', source(slug, id), { title }),
 	removeSource: (slug: string, id: string) => request<Notebook>(source(slug, id), { method: 'DELETE' }),
 	settings: () => request<Settings>('/settings'),
-	saveSettings: (update: { chat_model?: string; keys?: Record<string, string>; search?: SearchSettings }) =>
+	saveSettings: (update: {
+		chat_model?: string;
+		keys?: Record<string, string>;
+		search?: SearchSettings;
+		model_server?: string;
+	}) =>
 		send<Settings>('PUT', '/settings', update),
 	testModel: () => request<{ provider: string }>('/settings/test', { method: 'POST' }),
 	addFiles: (slug: string, files: File[]) => {
@@ -364,6 +370,8 @@ export const api = {
 
 export type AskHandlers = {
 	passages: (reading: Reading) => void;
+	/** The model started reasoning before it writes. */
+	thinking: () => void;
 	text: (text: string) => void;
 	cite: (citation: Citation) => void;
 	done: (turn: Turn) => void;
@@ -418,6 +426,7 @@ export function ask(
 		{ question, deep, chat },
 		(event, payload) => {
 			if (event === 'passages') on.passages(payload);
+			else if (event === 'thinking') on.thinking();
 			else if (event === 'text') on.text(payload);
 			else if (event === 'cite') on.cite(payload);
 			else if (event === 'done') on.done(payload);

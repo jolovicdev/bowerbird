@@ -1087,7 +1087,7 @@ deranged 0.5.9
 Apache License 2.0 (Apache-2.0)
 embed_plist 1.2.2
 encode_unicode 1.0.0
-encoding_rs 0.8.42
+encoding_rs 0.8.44
 fastembed 7.1.1
 fastembed 7.1.1
 flagset 0.4.7
@@ -4476,7 +4476,7 @@ fastembed 7.1.1
 
 ==============================================================================
 Apache License 2.0 (Apache-2.0)
-genai 0.7.2
+genai 0.7.3
 ------------------------------------------------------------------------------
                                  Apache License
                            Version 2.0, January 2004
@@ -9551,7 +9551,6 @@ hyper-rustls 0.27.10
 idna 1.1.0
 idna_adapter 1.2.2
 indexmap 2.14.2
-itertools 0.13.0
 itertools 0.14.0
 itertools 0.15.0
 jni 0.21.1
@@ -12846,7 +12845,7 @@ owned_ttf_parser 0.25.1
 paste 1.0.15
 pastey 0.1.1
 pastey 0.2.3
-pdfium-render 0.9.4
+pdfium-render 0.9.5
 pin-project-lite 0.2.17
 portable-atomic 1.15.0
 proc-macro2 1.0.107
@@ -13362,7 +13361,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
 BSD 3-Clause "New" or "Revised" License (BSD-3-Clause)
-encoding_rs 0.8.42
+encoding_rs 0.8.44
 ------------------------------------------------------------------------------
 // Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
 //
@@ -13686,7 +13685,7 @@ https://datatracker.ietf.org/ipr/1526/
 
 ==============================================================================
 BSD 3-Clause "New" or "Revised" License (BSD-3-Clause)
-encoding_rs 0.8.42
+encoding_rs 0.8.44
 ------------------------------------------------------------------------------
 Copyright © WHATWG (Apple, Google, Mozilla, Microsoft).
 
@@ -13747,7 +13746,7 @@ DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
 Community Data License Agreement Permissive 2.0 (CDLA-Permissive-2.0)
-webpki-root-certs 1.0.10
+webpki-root-certs 1.0.12
 ------------------------------------------------------------------------------
 # Community Data License Agreement - Permissive - Version 2.0
 
@@ -14070,8 +14069,8 @@ THE SOFTWARE.
 
 ==============================================================================
 MIT License (MIT)
-libsqlite3-sys 0.38.2
-rusqlite 0.40.2
+libsqlite3-sys 0.39.1
+rusqlite 0.41.1
 ------------------------------------------------------------------------------
 Copyright (c) 2014 The rusqlite developers
 

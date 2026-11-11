@@ -12,12 +12,13 @@ encoding_rs = "0.8"
 # ort versions can't link into one binary.
 fastembed = { version = "=7.1.1", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 futures = "0.3"
-genai = "=0.7.2"
+genai = "=0.7.3"
 oar-ocr = { version = "0.10", default-features = false, features = ["simd"] }
-pdfium-render = { version = "0.9", default-features = false, features = ["pdfium_latest", "thread_safe"] }
+# The PDFium build that scripts/fetch-pdfium.sh and scripts/windows.sh download.
+pdfium-render = { version = "0.9", default-features = false, features = ["pdfium_7881", "thread_safe"] }
 quick-xml = { version = "0.42", features = ["escape-html"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
-rusqlite = { version = "0.40", features = ["bundled", "fallible_uint"] }
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

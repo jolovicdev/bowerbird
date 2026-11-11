@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Downloads the prebuilt PDFium library into vendor/pdfium, or with
 # `android`, into the Android project.
-# The build number must match the pdfium_* feature that pdfium-render enables
-# (pdfium-render 0.9.4 defaults to pdfium_7881).
+# The build number must match the pdfium_* feature crates/core/Cargo.toml
+# enables for pdfium-render.
 set -euo pipefail
 
 BUILD=7881
@@ -20,7 +20,7 @@ fetch() {
     mac-x64) sha256=6dedf83990e0e3d6b7c93c9e7589c5a126b0ae14b7464d76120cff7a26afb18b ;;
   esac
   archive="$(mktemp)"
-  curl -fsSL -o "$archive" \
+  curl -fsSL --retry 3 -o "$archive" \
     "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${BUILD}/pdfium-$1.tgz"
   # Older macOS has only shasum, and the sha256sum newer macOS ships takes no
   # long options; every one of them prints the hash first.

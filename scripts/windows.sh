@@ -39,7 +39,7 @@ DML="$(find "${XDG_CACHE_HOME:-$HOME/.cache}" -path "*/dfbin/$TARGET/*" -name Di
 [ -n "$DML" ] || { echo "DirectML.dll not found in the ort cache" >&2; exit 1; }
 cp "$DML" "$OUT/"
 TMP="$(mktemp -d)"
-curl -fsSL -o "$TMP/pdfium.tgz" \
+curl -fsSL --retry 3 -o "$TMP/pdfium.tgz" \
   "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${BUILD}/pdfium-win-x64.tgz"
 echo "73cc0de638ac2095e7445bf56a38200a5b7c7ca0e9f4ba144598f2457377ac08  $TMP/pdfium.tgz" \
   | sha256sum --status -c || { echo "pdfium-win-x64.tgz doesn't match its recorded SHA-256" >&2; exit 1; }

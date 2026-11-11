@@ -259,6 +259,7 @@ async fn report_job(
         |event| match event {
             ask::Event::Text(text) => send_event(&tx, "text", text),
             ask::Event::Citation(c) => send_event(&tx, "cite", c),
+            ask::Event::Thinking => {}
         },
     )
     .await?;

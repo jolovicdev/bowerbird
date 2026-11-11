@@ -201,6 +201,7 @@ async fn run_ask(name: &str, question: &str, model: &str, deep: bool) -> CliResu
                     let mark = if c.verified { "" } else { "?" };
                     write!(out, "[{}{page}{mark}]", c.letter)
                 }
+                Event::Thinking => Ok(()),
             };
             let _ = out.flush();
         },

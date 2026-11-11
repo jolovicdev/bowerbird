@@ -2,13 +2,13 @@
 //! every citation against the passage it points to.
 
 use std::sync::{Arc, PoisonError, RwLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
 use genai::ModelIden;
 use genai::adapter::AdapterKind;
-use genai::chat::{ChatMessage, ChatRequest, ChatStreamEvent};
-use genai::resolver::{AuthData, AuthResolver};
+use genai::chat::{ChatMessage, ChatRequest, ChatStreamEvent, StopReason};
+use genai::resolver::{AuthData, AuthResolver, Endpoint};
 use serde::{Deserialize, Serialize};
 
 use crate::cite::{self, Piece};
@@ -21,6 +21,11 @@ use crate::{Error, Result};
 
 pub const DEFAULT_MODEL: &str = "deepseek-flash";
 const MAX_DEEP_SECTIONS: usize = 6;
+
+/// How long a provider may send nothing before Bowerbird stops waiting. A
+/// thinking model streams its reasoning as it goes, so a silence this long
+/// means the stream died or the request never started.
+const SILENCE: Duration = Duration::from_secs(120);
 
 pub(crate) const CITE_RULES: &str = "Cite every sentence that states something from the passages with one or more markers in the form [[A3|exact words]]. A3 is the passage label. Exact words is a quote of 3 to 15 words (at least 8 characters in Chinese or Japanese) copied character for character from that passage.
 Put markers right after the sentence they support, never inside headings, quotes, or code.";
@@ -87,6 +92,8 @@ pub struct Citation {
 pub enum Event<'a> {
     Text(&'a str),
     Citation(&'a Citation),
+    /// The model started reasoning, which it does before it writes. Sent once.
+    Thinking,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -168,6 +175,7 @@ pub fn plain_text(text: &str) -> String {
 }
 
 pub fn client(settings: SharedSettings) -> Result<genai::Client> {
+    let servers = settings.clone();
     let resolver = AuthResolver::from_resolver_fn(move |iden: ModelIden| {
         // Providers without a key variable (local Ollama) need no key.
         let Some(env_name) = iden.adapter_kind.default_key_env_name() else {
@@ -192,6 +200,20 @@ pub fn client(settings: SharedSettings) -> Result<genai::Client> {
     genai::Client::builder()
         .with_reqwest(http)
         .with_auth_resolver(resolver)
+        .with_service_target_resolver_fn(move |mut target: genai::ServiceTarget| {
+            let settings = servers.read().unwrap_or_else(PoisonError::into_inner);
+            if target.model.adapter_kind == AdapterKind::Ollama
+                && let Some(endpoint) = settings.model_server.as_deref().and_then(server_endpoint)
+            {
+                // Ollama, LM Studio and llama.cpp all speak OpenAI's protocol,
+                // which always sends a key; they take any key.
+                let name = target.model.model_name.namespace_and_name().1.to_string();
+                target.model = ModelIden::new(AdapterKind::OpenAI, name);
+                target.endpoint = Endpoint::from_owned(endpoint);
+                target.auth = AuthData::from_single("none");
+            }
+            Ok(target)
+        })
         .with_model_mapper_fn(|iden: ModelIden| {
             Ok(match provider_named(&iden.model_name) {
                 Some((kind, name)) => {
@@ -207,8 +229,9 @@ pub fn client(settings: SharedSettings) -> Result<genai::Client> {
 /// The provider a model name with a colon asks for: `provider::name`,
 /// `provider:name`, or Ollama for its own `name:tag`. genai reads only its own
 /// spelling, `open_router::name`, and picks by how a name starts, which would
-/// send the local `deepseek-r1:7b` to DeepSeek. So this also takes a provider
-/// as Settings lists it, in any case, and keeps tagged names local.
+/// send `glm-5.3-flash:cloud`, which runs through Ollama, to Z.ai. So this also
+/// takes a provider as Settings lists it, in any case, and keeps tagged names
+/// with Ollama.
 fn provider_named(model: &str) -> Option<(AdapterKind, &str)> {
     let two_colons = model.split_once("::");
     let (front, name) = two_colons.or_else(|| model.split_once(':'))?;
@@ -230,6 +253,49 @@ fn provider_named(model: &str) -> Option<(AdapterKind, &str)> {
         None if two_colons.is_none() => Some((AdapterKind::Ollama, model)),
         None => None,
     }
+}
+
+/// The base of the OpenAI-compatible API at a server address. Ollama, LM
+/// Studio and llama.cpp all serve it under `/v1/`, so an address without a
+/// path gets that; one typed without a scheme gets `http://`. None for an
+/// address that can't be a web server.
+pub fn server_endpoint(address: &str) -> Option<String> {
+    let address = address.trim();
+    let address = if address.contains("://") {
+        address.to_string()
+    } else {
+        format!("http://{address}")
+    };
+    let mut url = reqwest::Url::parse(&address).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return None;
+    }
+    let path = match url.path() {
+        "/" => "/v1/".to_string(),
+        path if path.ends_with('/') => path.to_string(),
+        // A base without its last slash would lose its last segment when
+        // `chat/completions` is joined on.
+        path => format!("{path}/"),
+    };
+    url.set_path(&path);
+    Some(url.to_string())
+}
+
+/// The address of the user's own server, as messages name it, when Settings
+/// sends `model` there.
+async fn own_server(client: &genai::Client, model: &str) -> Option<String> {
+    if provider_name(model) != AdapterKind::Ollama.as_str() {
+        return None;
+    }
+    let target = client.resolve_service_target(model).await.ok()?;
+    if target.model.adapter_kind == AdapterKind::Ollama {
+        return None;
+    }
+    let url = reqwest::Url::parse(target.endpoint.base_url()).ok()?;
+    Some(match url.port() {
+        Some(port) => format!("{}:{port}", url.host_str()?),
+        None => url.host_str()?.to_string(),
+    })
 }
 
 /// The provider's display name for a model id, e.g. "DeepSeek".
@@ -286,9 +352,10 @@ fn transient(error: &genai::Error) -> bool {
     ) && retry::transient_status(status(error))
 }
 
-pub(crate) fn model_error(model: &str, error: genai::Error) -> Error {
+/// `server` is the user's own server when the model went there.
+pub(crate) fn model_error(model: &str, server: Option<&str>, error: genai::Error) -> Error {
     use genai::Error as G;
-    let provider = provider_name(model);
+    let provider = server.unwrap_or(provider_name(model));
     let status = status(&error);
     let reason = refusal_reason(&error);
     let message = match (&error, status) {
@@ -310,9 +377,13 @@ pub(crate) fn model_error(model: &str, error: genai::Error) -> Error {
             None => format!("{provider} refused the request ({code})."),
         },
         (G::WebModelCall { .. } | G::WebAdapterCall { .. } | G::WebStream { .. }, None) => {
-            if provider == AdapterKind::Ollama.as_str() {
+            if server.is_some() {
                 format!(
-                    "Ollama isn't answering on this device. “{model}” goes to Ollama because no other provider is named in front of it. To use another provider, put its name in front in Settings, as in groq::model-name."
+                    "Nothing answers at {provider}. Check the server address in Settings, and that the server is running."
+                )
+            } else if provider == AdapterKind::Ollama.as_str() {
+                format!(
+                    "Ollama isn't answering on this device. “{model}” goes to Ollama because no other provider is named in front of it. To use another provider, put its name in front in Settings, as in groq::model-name. For a server on another computer, add its address in Settings."
                 )
             } else {
                 format!("Bowerbird couldn't reach {provider}. Check your internet connection.")
@@ -326,24 +397,26 @@ pub(crate) fn model_error(model: &str, error: genai::Error) -> Error {
 /// Sends one short message the way an answer goes out, to find out whether the
 /// model name, the key and the account behind it all work. A provider's model
 /// list can't tell, since several hand it to any key. Costs a few tokens.
-pub async fn check_model(client: &genai::Client, model: &str) -> Result<()> {
-    match reply_starts(client, model).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(Error::Model(format!(
-            "{} sent no reply.",
-            provider_name(model)
-        ))),
-        Err(e) => Err(model_error(model, e)),
+/// Gives who answered: the provider, or the address of the user's own server.
+pub async fn check_model(client: &genai::Client, model: &str) -> Result<String> {
+    let server = own_server(client, model).await;
+    let answerer = server.as_deref().unwrap_or(provider_name(model));
+    match reply_starts(client, model, silence_limit(model)).await {
+        Ok(true) => Ok(answerer.to_string()),
+        Ok(false) => Err(Error::Model(format!("{answerer} sent no reply."))),
+        Err(e) => Err(model_error(model, server.as_deref(), e)),
     }
 }
 
+/// A provider silent for `limit` counts as sending no reply.
 async fn reply_starts(
     client: &genai::Client,
     model: impl Into<genai::ModelSpec>,
+    limit: Duration,
 ) -> genai::Result<bool> {
     let request = ChatRequest::new(vec![ChatMessage::user("Reply with the word OK.")]);
     let mut stream = client.exec_chat_stream(model, request, None).await?.stream;
-    while let Some(event) = stream.next().await {
+    while let Ok(Some(event)) = tokio::time::timeout(limit, stream.next()).await {
         if matches!(
             event?,
             ChatStreamEvent::Chunk(_) | ChatStreamEvent::ReasoningChunk(_)
@@ -419,37 +492,30 @@ pub async fn answer(
     }
     messages.push(ChatMessage::user(prompt));
     let request = ChatRequest::new(messages);
+    let server = own_server(client, model).await;
     let mut timings = Timings {
         request_ms: ms_since(started),
         ..Default::default()
     };
     // Retried only until the reply starts; a reply cut off midway is reported.
-    let response = retry::with_retries(
+    let mut response = retry::with_retries(
         || client.exec_chat_stream(model, request.clone(), None),
         transient,
     )
     .await
-    .map_err(|e| model_error(model, e))?;
+    .map_err(|e| model_error(model, server.as_deref(), e))?;
 
-    let mut stream = response.stream;
-    let mut parser = cite::Parser::default();
-    let mut text = String::new();
-    let mut citations = Vec::new();
-    while let Some(event) = stream.next().await {
-        let pieces = match event.map_err(|e| model_error(model, e))? {
-            ChatStreamEvent::Chunk(chunk) => {
-                timings
-                    .first_token_ms
-                    .get_or_insert_with(|| ms_since(started));
-                text.push_str(&chunk.content);
-                parser.feed(&chunk.content)
-            }
-            ChatStreamEvent::End(_) => break,
-            _ => continue,
-        };
-        emit(pieces, ctx, &mut citations, &mut on);
-    }
-    emit(parser.finish(), ctx, &mut citations, &mut on);
+    let (text, citations) = read_reply(
+        &mut response.stream,
+        model,
+        server.as_deref(),
+        silence_limit(model),
+        started,
+        &mut timings,
+        ctx,
+        &mut on,
+    )
+    .await?;
     timings.total_ms = ms_since(started);
 
     Ok(Answer {
@@ -463,6 +529,90 @@ pub async fn answer(
         timings,
         deep: false,
     })
+}
+
+/// No limit for Ollama or the user's own server, which run on the user's own
+/// hardware: reading a long prompt on a CPU can take minutes before the first
+/// word.
+fn silence_limit(model: &str) -> Duration {
+    if provider_name(model) == AdapterKind::Ollama.as_str() {
+        Duration::MAX
+    } else {
+        SILENCE
+    }
+}
+
+/// Reads a streamed reply, passing its text and citations to `on` as they
+/// arrive. Gives up once the provider has sent nothing for `limit`, and fails
+/// on a reply without text, which a thinking model can end with.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is a separate input the caller already holds"
+)]
+async fn read_reply(
+    stream: &mut genai::chat::ChatStream,
+    model: &str,
+    server: Option<&str>,
+    limit: Duration,
+    started: Instant,
+    timings: &mut Timings,
+    ctx: &Context,
+    on: &mut impl FnMut(Event),
+) -> Result<(String, Vec<Citation>)> {
+    let mut parser = cite::Parser::default();
+    let mut text = String::new();
+    let mut citations = Vec::new();
+    let mut thinking = false;
+    let mut stop = None;
+    let provider = server.unwrap_or(provider_name(model));
+    loop {
+        let event = match tokio::time::timeout(limit, stream.next()).await {
+            Err(_) => {
+                return Err(Error::Model(format!(
+                    "{provider} sent nothing for {} s, so Bowerbird stopped waiting. Try again, or choose another model in Settings.",
+                    limit.as_secs()
+                )));
+            }
+            Ok(None) => break,
+            Ok(Some(event)) => event.map_err(|e| model_error(model, server, e))?,
+        };
+        let pieces = match event {
+            ChatStreamEvent::Chunk(chunk) => {
+                timings
+                    .first_token_ms
+                    .get_or_insert_with(|| ms_since(started));
+                text.push_str(&chunk.content);
+                parser.feed(&chunk.content)
+            }
+            ChatStreamEvent::ReasoningChunk(_) if !thinking => {
+                thinking = true;
+                on(Event::Thinking);
+                continue;
+            }
+            ChatStreamEvent::End(end) => {
+                stop = end.captured_stop_reason;
+                break;
+            }
+            _ => continue,
+        };
+        emit(pieces, ctx, &mut citations, on);
+    }
+    emit(parser.finish(), ctx, &mut citations, on);
+    if text.trim().is_empty() {
+        let message = match stop {
+            Some(StopReason::ContentFilter(_)) => format!(
+                "{provider} ended the answer before writing any of it: a content filter stopped it."
+            ),
+            Some(StopReason::MaxTokens(_)) => format!(
+                "{provider} ended the answer before writing any of it: the model hit its length limit."
+            ),
+            _ => format!("{provider} sent an empty answer."),
+        };
+        return Err(Error::Model(format!(
+            "{message} Try again, or choose another model in Settings."
+        )));
+    }
+    Ok((text, citations))
 }
 
 fn emit(
@@ -572,10 +722,11 @@ pub(crate) async fn complete(
     user: String,
 ) -> Result<String> {
     let request = ChatRequest::new(vec![ChatMessage::system(system), ChatMessage::user(user)]);
+    let server = own_server(client, model).await;
     let response =
         retry::with_retries(|| client.exec_chat(model, request.clone(), None), transient)
             .await
-            .map_err(|e| model_error(model, e))?;
+            .map_err(|e| model_error(model, server.as_deref(), e))?;
     Ok(response.first_text().unwrap_or_default().to_string())
 }
 
@@ -818,7 +969,7 @@ mod tests {
             // A model and its tag, in Ollama's naming.
             ("llama3:8b", Ollama, "llama3:8b"),
             ("mistral:7b", Ollama, "mistral:7b"),
-            ("deepseek-r1:7b", Ollama, "deepseek-r1:7b"),
+            ("glm-5.3-flash:cloud", Ollama, "glm-5.3-flash:cloud"),
             ("command-r:35b", Ollama, "command-r:35b"),
             ("Mistral:7b", Ollama, "Mistral:7b"),
             ("hf.co/user/model:Q4", Ollama, "hf.co/user/model:Q4"),
@@ -879,6 +1030,224 @@ mod tests {
             auth: AuthData::from_single("key"),
             model: ModelIden::new(kind, "some-model"),
         }
+    }
+
+    /// A provider that takes a request and never answers or closes it.
+    async fn silent_provider() -> genai::ServiceTarget {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let _held = listener.accept().await;
+            std::future::pending::<()>().await;
+        });
+        genai::ServiceTarget {
+            endpoint: genai::resolver::Endpoint::from_owned(endpoint),
+            auth: AuthData::from_single("key"),
+            model: ModelIden::new(AdapterKind::OpenRouter, "some-model"),
+        }
+    }
+
+    /// The reply `target` streams, read the way an answer is.
+    async fn read(target: genai::ServiceTarget, limit: Duration) -> Result<Vec<String>> {
+        let client = client(Arc::default()).unwrap();
+        let mut stream = client
+            .exec_chat_stream(target, question(), None)
+            .await
+            .unwrap()
+            .stream;
+        let ctx = Context {
+            hits: Vec::new(),
+            passages: Vec::new(),
+        };
+        let mut events = Vec::new();
+        read_reply(
+            &mut stream,
+            "open_router::x",
+            None,
+            limit,
+            Instant::now(),
+            &mut Timings::default(),
+            &ctx,
+            &mut |event| {
+                events.push(match event {
+                    Event::Text(text) => format!("text {text}"),
+                    Event::Citation(c) => format!("cite {}", c.label),
+                    Event::Thinking => "thinking".to_string(),
+                })
+            },
+        )
+        .await?;
+        Ok(events)
+    }
+
+    #[tokio::test]
+    async fn a_thinking_model_is_reported_before_its_answer_arrives() {
+        let reasoning = |text: &str| {
+            format!(
+                "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"reasoning\":\"{text}\"}}}}]}}\n\n"
+            )
+        };
+        let reply = format!(
+            "{}{}data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"Blue.\"}}}}]}}\n\ndata: [DONE]\n\n",
+            reasoning("The user asks"),
+            reasoning(" about color.")
+        );
+        let target = provider(AdapterKind::OpenRouter, Some(("200 OK", &reply))).await;
+        assert_eq!(
+            read(target, SILENCE).await.unwrap(),
+            ["thinking", "text Blue."]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_ends_without_text_says_why() {
+        let thought =
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"Let me see.\"}}]}\n\n";
+        for (finish, message) in [
+            (
+                "content_filter",
+                "OpenRouter ended the answer before writing any of it: a content filter stopped it.",
+            ),
+            (
+                "length",
+                "OpenRouter ended the answer before writing any of it: the model hit its length limit.",
+            ),
+            ("stop", "OpenRouter sent an empty answer."),
+        ] {
+            let reply = format!(
+                "{thought}data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"{finish}\"}}]}}\n\ndata: [DONE]\n\n"
+            );
+            let target = provider(AdapterKind::OpenRouter, Some(("200 OK", &reply))).await;
+            assert_eq!(
+                read(target, SILENCE).await.unwrap_err().to_string(),
+                format!("{message} Try again, or choose another model in Settings.")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_goes_silent_is_given_up_on() {
+        let limit = Duration::from_secs(1);
+        assert_eq!(
+            read(silent_provider().await, limit)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "OpenRouter sent nothing for 1 s, so Bowerbird stopped waiting. Try again, or choose another model in Settings."
+        );
+        let client = client(Arc::default()).unwrap();
+        assert!(
+            !reply_starts(&client, silent_provider().await, limit)
+                .await
+                .unwrap()
+        );
+        assert_eq!(silence_limit("open_router::x"), SILENCE);
+        assert_eq!(silence_limit("llama3:8b"), Duration::MAX);
+    }
+
+    #[test]
+    fn a_server_address_becomes_the_base_of_its_openai_api() {
+        for (typed, base) in [
+            (
+                "http://192.168.1.20:11434",
+                Some("http://192.168.1.20:11434/v1/"),
+            ),
+            ("192.168.1.20:1234", Some("http://192.168.1.20:1234/v1/")),
+            ("localhost:8080", Some("http://localhost:8080/v1/")),
+            (
+                "http://localhost:8080/v1",
+                Some("http://localhost:8080/v1/"),
+            ),
+            (
+                " https://models.example.org/api/v1/ ",
+                Some("https://models.example.org/api/v1/"),
+            ),
+            ("ftp://192.168.1.20", None),
+            ("http://", None),
+            ("", None),
+        ] {
+            assert_eq!(server_endpoint(typed).as_deref(), base, "{typed}");
+        }
+    }
+
+    /// A server that answers one request with `reply` and hands back the
+    /// request's head.
+    async fn recording_server(
+        reply: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 16384];
+            let n = conn.read(&mut request).await.unwrap();
+            let _ = tx.send(String::from_utf8_lossy(&request[..n]).into_owned());
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            let _ = conn.write_all(reply.as_bytes()).await;
+        });
+        (address, rx)
+    }
+
+    fn client_with_server(address: &str) -> genai::Client {
+        let settings = Settings {
+            model_server: Some(address.to_string()),
+            keys: [("DEEPSEEK_API_KEY".to_string(), "key".to_string())].into(),
+            ..Default::default()
+        };
+        client(Arc::new(RwLock::new(settings))).unwrap()
+    }
+
+    #[tokio::test]
+    async fn models_that_would_go_to_ollama_go_to_the_server_in_settings() {
+        let ok = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n";
+        let (address, request) = recording_server(ok).await;
+        let client = client_with_server(&address);
+        assert_eq!(
+            check_model(&client, "qwen/qwen3-8b").await.unwrap(),
+            address.trim_start_matches("http://")
+        );
+        let request = request.await.unwrap();
+        assert!(
+            request.starts_with("POST /v1/chat/completions "),
+            "{request}"
+        );
+        for (typed, name) in [
+            ("qwen/qwen3-8b", "qwen/qwen3-8b"),
+            ("llama3:8b", "llama3:8b"),
+            ("ollama::llama3:8b", "llama3:8b"),
+        ] {
+            let target = client.resolve_service_target(typed).await.unwrap();
+            assert_eq!(target.model.adapter_kind, AdapterKind::OpenAI, "{typed}");
+            assert_eq!(target.model.model_name.namespace_and_name().1, name);
+            assert_eq!(target.endpoint.base_url(), format!("{address}/v1/"));
+        }
+        let target = client
+            .resolve_service_target("deepseek-flash")
+            .await
+            .unwrap();
+        assert_eq!(target.model.adapter_kind, AdapterKind::DeepSeek);
+    }
+
+    #[tokio::test]
+    async fn a_server_in_settings_that_doesnt_answer_is_named() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = listener.local_addr().unwrap().to_string();
+        drop(listener);
+        let client = client_with_server(&host);
+        assert_eq!(
+            check_model(&client, "llama3:8b")
+                .await
+                .unwrap_err()
+                .to_string(),
+            format!(
+                "Nothing answers at {host}. Check the server address in Settings, and that the server is running."
+            )
+        );
     }
 
     fn question() -> ChatRequest {
@@ -945,7 +1314,7 @@ mod tests {
             ),
         ] {
             let target = provider(AdapterKind::OpenRouter, Some((status, body))).await;
-            let error = model_error("open_router::x", stream_failure(target).await);
+            let error = model_error("open_router::x", None, stream_failure(target).await);
             assert_eq!(error.to_string(), message);
         }
     }
@@ -955,19 +1324,19 @@ mod tests {
         let client = client(Arc::default()).unwrap();
         let reply = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n";
         let target = provider(AdapterKind::OpenRouter, Some(("200 OK", reply))).await;
-        assert!(reply_starts(&client, target).await.unwrap());
+        assert!(reply_starts(&client, target, SILENCE).await.unwrap());
         let empty = "data: [DONE]\n\n";
         let target = provider(AdapterKind::OpenRouter, Some(("200 OK", empty))).await;
-        assert!(!reply_starts(&client, target).await.unwrap());
+        assert!(!reply_starts(&client, target, SILENCE).await.unwrap());
         let refused = r#"{"error":{"message":"Insufficient credits","code":402}}"#;
         let target = provider(
             AdapterKind::OpenRouter,
             Some(("402 Payment Required", refused)),
         )
         .await;
-        let failure = reply_starts(&client, target).await.unwrap_err();
+        let failure = reply_starts(&client, target, SILENCE).await.unwrap_err();
         assert_eq!(
-            model_error("open_router::x", failure).to_string(),
+            model_error("open_router::x", None, failure).to_string(),
             "OpenRouter refused the request (402): Insufficient credits"
         );
     }
@@ -982,7 +1351,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(
-            model_error("open_router::x", failure).to_string(),
+            model_error("open_router::x", None, failure).to_string(),
             "OpenRouter refused the request (400): x is not a valid model ID"
         );
     }
@@ -991,13 +1360,13 @@ mod tests {
     async fn an_unanswered_request_says_where_to_look() {
         let target = provider(AdapterKind::OpenRouter, None).await;
         assert_eq!(
-            model_error("open_router::x", stream_failure(target).await).to_string(),
+            model_error("open_router::x", None, stream_failure(target).await).to_string(),
             "Bowerbird couldn't reach OpenRouter. Check your internet connection."
         );
         let target = provider(AdapterKind::Ollama, None).await;
         assert_eq!(
-            model_error("vendor/model", stream_failure(target).await).to_string(),
-            "Ollama isn't answering on this device. “vendor/model” goes to Ollama because no other provider is named in front of it. To use another provider, put its name in front in Settings, as in groq::model-name."
+            model_error("vendor/model", None, stream_failure(target).await).to_string(),
+            "Ollama isn't answering on this device. “vendor/model” goes to Ollama because no other provider is named in front of it. To use another provider, put its name in front in Settings, as in groq::model-name. For a server on another computer, add its address in Settings."
         );
     }
 }

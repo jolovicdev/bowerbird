@@ -32,6 +32,7 @@ pub(crate) struct SettingsView {
     search: SearchSettings,
     /// Search services that take a key.
     search_keys: Vec<ProviderView>,
+    model_server: Option<String>,
 }
 
 fn settings_view(settings: &Settings) -> SettingsView {
@@ -50,6 +51,7 @@ fn settings_view(settings: &Settings) -> SettingsView {
         providers: settings::providers().into_iter().map(view).collect(),
         search: settings.search.clone(),
         search_keys: search::KEYS.into_iter().map(view).collect(),
+        model_server: settings.model_server.clone(),
     }
 }
 
@@ -59,17 +61,15 @@ pub(crate) async fn get_settings(State(state): State<AppState>) -> Json<Settings
 
 #[derive(Serialize)]
 pub(crate) struct ModelTest {
-    provider: &'static str,
+    provider: String,
 }
 
 /// Sends the model in Settings one short message.
 pub(crate) async fn test_model(State(state): State<AppState>) -> ApiResult<Json<ModelTest>> {
     let model = state.settings().chat_model().to_string();
     let client = ask::client(state.settings.clone())?;
-    ask::check_model(&client, &model).await?;
-    Ok(Json(ModelTest {
-        provider: ask::provider_name(&model),
-    }))
+    let provider = ask::check_model(&client, &model).await?;
+    Ok(Json(ModelTest { provider }))
 }
 
 #[derive(Deserialize)]
@@ -80,6 +80,8 @@ pub(crate) struct SettingsUpdate {
     #[serde(default)]
     keys: BTreeMap<String, String>,
     search: Option<SearchSettings>,
+    /// An empty address means Ollama on this device.
+    model_server: Option<String>,
 }
 
 pub(crate) async fn put_settings(
@@ -98,6 +100,15 @@ pub(crate) async fn put_settings(
             format!("No provider takes a key named {name}."),
         ));
     }
+    if let Some(address) = update.model_server.as_deref().map(str::trim)
+        && !address.is_empty()
+        && ask::server_endpoint(address).is_none()
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!("“{address}” isn't a server address. Use one like http://192.168.1.20:11434."),
+        ));
+    }
     blocking(move || {
         let mut current = state
             .settings
@@ -110,6 +121,10 @@ pub(crate) async fn put_settings(
         }
         if let Some(search) = update.search {
             next.search = search;
+        }
+        if let Some(address) = update.model_server {
+            let address = address.trim();
+            next.model_server = (!address.is_empty()).then(|| address.to_string());
         }
         for (env, key) in update.keys {
             match key.trim() {

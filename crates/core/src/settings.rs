@@ -24,6 +24,11 @@ pub struct Settings {
     /// How web searches for new sources run.
     #[serde(default)]
     pub search: SearchSettings,
+    /// The user's own model server, such as Ollama on another computer, LM
+    /// Studio or llama.cpp. It gets the models that would go to Ollama on this
+    /// device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_server: Option<String>,
 }
 
 /// `$BOWERBIRD_CONFIG`, else `bowerbird/settings.toml` in the user's config folder.

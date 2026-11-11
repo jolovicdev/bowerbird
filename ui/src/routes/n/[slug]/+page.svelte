@@ -60,6 +60,7 @@
 	let liveError = $state<string | null>(null);
 	let liveStopped = $state(false);
 	let reading = $state<Reading | null>(null);
+	let thinking = $state(false);
 	let liveSince = $state(0);
 	let controller: AbortController | null = null;
 
@@ -435,6 +436,7 @@
 		liveError = null;
 		liveStopped = false;
 		reading = null;
+		thinking = false;
 		liveSince = Date.now();
 		announcement = '';
 		askedHere = true;
@@ -455,6 +457,7 @@
 						reading = r;
 						chat = r.chat;
 					},
+					thinking: () => (thinking = true),
 					text: (text) => {
 						const last = turn.pieces.at(-1);
 						if (last && 'text' in last) last.text += text;
@@ -671,6 +674,7 @@
 					error={liveError}
 					stopped={liveStopped}
 					{reading}
+					{thinking}
 					since={liveSince}
 					onopen={sheet.openCitations}
 					onretry={retry}

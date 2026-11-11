@@ -231,6 +231,7 @@ async fn run_ask(
         |event| match event {
             ask::Event::Text(text) => send_event(&tx, "text", text),
             ask::Event::Citation(c) => send_event(&tx, "cite", c),
+            ask::Event::Thinking => send_event(&tx, "thinking", &true),
         },
     )
     .await?;

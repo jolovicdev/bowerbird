@@ -1,0 +1,17 @@
+# Secrets never enter the build: API keys and the Android signing key.
+.env
+crates/desktop/gen
+**/*.jks
+
+# Build output and downloads, made again inside the image.
+target
+vendor
+dist
+ui/node_modules
+ui/build
+ui/.svelte-kit
+ui/test-results
+ui/playwright-report
+
+.git
+docs

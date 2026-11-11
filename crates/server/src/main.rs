@@ -23,13 +23,24 @@ struct Args {
     allow_private_links: bool,
 }
 
-/// Fixed token instead of a fresh one per start, e.g. for tests.
+/// Fixed token instead of a fresh one per start, e.g. for tests. It is also
+/// the password the sign-in page asks for.
 const TOKEN_ENV: &str = "BOWERBIRD_TOKEN";
+/// Shortest token accepted when anyone else can reach the server.
+const MIN_SHARED_TOKEN: usize = 16;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let args = Args::parse();
-    let token = std::env::var(TOKEN_ENV).unwrap_or_else(|_| bowerbird_server::new_token());
+    let chosen = std::env::var(TOKEN_ENV).ok();
+    let token = chosen.clone().unwrap_or_else(bowerbird_server::new_token);
+    if !args.addr.ip().is_loopback() && token.chars().count() < MIN_SHARED_TOKEN {
+        eprintln!(
+            "{TOKEN_ENV} must be at least {MIN_SHARED_TOKEN} characters: it is the password for anyone who can reach {}.",
+            args.addr
+        );
+        std::process::exit(2);
+    }
     let ui_dir = args
         .ui
         .join(bowerbird_server::UI_SHELL)
@@ -56,9 +67,18 @@ async fn main() -> std::io::Result<()> {
             args.addr
         );
     }
-    println!(
-        "Bowerbird is running at http://{}/#token={token}",
-        args.addr
-    );
+    // A chosen token is a password, and logs get collected and shared, so
+    // only a token made for this start is printed.
+    if chosen.is_some() {
+        println!(
+            "Bowerbird is running at http://{}/. Sign in with {TOKEN_ENV}.",
+            args.addr
+        );
+    } else {
+        println!(
+            "Bowerbird is running at http://{}/#token={token}",
+            args.addr
+        );
+    }
     axum::serve(listener, app).await
 }

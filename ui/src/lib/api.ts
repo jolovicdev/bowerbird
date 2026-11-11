@@ -247,10 +247,21 @@ function borrowToken(): Promise<void> {
 	});
 }
 
-async function authorization(): Promise<string> {
-	if (!token()) await borrowToken();
-	return `Bearer ${token()}`;
+let borrowed = false;
+
+/** The bearer header, or null for a tab signed in with the server's cookie instead. */
+async function authorization(): Promise<string | null> {
+	if (!token() && !borrowed) {
+		borrowed = true;
+		await borrowToken();
+	}
+	return token() ? `Bearer ${token()}` : null;
 }
+
+/** Fired when the server refuses this tab's token or sign-in; the layout then asks for the password. */
+export const SIGN_IN_EVENT = 'bowerbird-sign-in';
+let refused = false;
+export const signInNeeded = () => refused;
 
 function token(): string {
 	if (pageToken) return pageToken;
@@ -268,12 +279,17 @@ async function failure(res: Response): Promise<ApiError> {
 	} catch {
 		// Body wasn't JSON; keep the status message.
 	}
+	if (res.status === 401 && !refused) {
+		refused = true;
+		dispatchEvent(new Event(SIGN_IN_EVENT));
+	}
 	return new ApiError(res.status, message);
 }
 
 async function fetchApi(path: string, init: RequestInit = {}): Promise<Response> {
 	const headers = new Headers(init.headers);
-	headers.set('Authorization', await authorization());
+	const auth = await authorization();
+	if (auth) headers.set('Authorization', auth);
 	const res = await fetch(`/api${path}`, { ...init, headers });
 	if (!res.ok) throw await failure(res);
 	return res;
@@ -296,6 +312,8 @@ const nb = (slug: string) => `/notebooks/${encodeURIComponent(slug)}`;
 const source = (slug: string, id: string) => `${nb(slug)}/sources/${encodeURIComponent(id)}`;
 
 export const api = {
+	/** Sets the cookie that keeps this browser signed in. */
+	signIn: (password: string) => post<void>('/login', { password }),
 	notebooks: () => request<NotebookSummary[]>('/notebooks'),
 	notebook: (slug: string) => request<Notebook>(nb(slug)),
 	chats: (slug: string) => request<ChatSummary[]>(`${nb(slug)}/chats`),
@@ -382,9 +400,10 @@ export type AskHandlers = {
  * each event's name and JSON payload. EventSource can't POST or send headers,
  * so this reads the stream itself. */
 async function stream(path: string, body: unknown, on: (event: string, payload: any) => void, signal?: AbortSignal) {
+	const auth = await authorization();
 	const res = await fetch(`/api${path}`, {
 		method: 'POST',
-		headers: { Authorization: await authorization(), 'Content-Type': 'application/json' },
+		headers: { ...(auth && { Authorization: auth }), 'Content-Type': 'application/json' },
 		body: JSON.stringify(body),
 		signal
 	});

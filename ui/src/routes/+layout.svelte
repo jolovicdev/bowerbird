@@ -5,9 +5,11 @@
 	import '../app.css';
 	import { onMount } from 'svelte';
 	import { replaceState } from '$app/navigation';
-	import { takeTokenFromUrl } from '#lib/api.ts';
+	import { SIGN_IN_EVENT, signInNeeded, takeTokenFromUrl } from '#lib/api.ts';
+	import SignIn from '#lib/components/SignIn.svelte';
 
 	let { children } = $props();
+	let signingIn = $state(false);
 
 	// Runs before any page loads data, so the first request already carries the token.
 	const cleanUrl = takeTokenFromUrl(new URL(location.href));
@@ -20,6 +22,9 @@
 			if (clean) location.replace(clean);
 		};
 		addEventListener('hashchange', tokenFromHash);
+		const askForPassword = () => (signingIn = true);
+		if (signInNeeded()) askForPassword();
+		addEventListener(SIGN_IN_EVENT, askForPassword);
 		// Links that open outside the app go to Android's browser in the phone app.
 		const android = window.BowerbirdAndroid;
 		const openOutside = (event: MouseEvent) => {
@@ -31,9 +36,10 @@
 		addEventListener('click', openOutside);
 		return () => {
 			removeEventListener('hashchange', tokenFromHash);
+			removeEventListener(SIGN_IN_EVENT, askForPassword);
 			removeEventListener('click', openOutside);
 		};
 	});
 </script>
 
-{@render children()}
+{#if signingIn}<SignIn />{:else}{@render children()}{/if}

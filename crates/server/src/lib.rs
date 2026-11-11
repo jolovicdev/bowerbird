@@ -1,5 +1,6 @@
 //! HTTP API over the core, plus the built UI from the same origin. Every
-//! `/api` request needs the bearer token printed at startup.
+//! `/api` request needs the token printed at startup, as a bearer header or
+//! as the cookie a sign-in sets.
 
 mod chats;
 mod embedding;
@@ -16,10 +17,10 @@ mod studio;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{DefaultBodyLimit, FromRequest, Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
@@ -61,6 +62,11 @@ const UPLOAD_LIMIT: usize = 200 * 1024 * 1024;
 struct AppState {
     library: Arc<PathBuf>,
     token: Arc<str>,
+    /// What a signed-in browser's cookie holds: a hash of the token, so the
+    /// cookie never carries the password, and a new token signs everyone out.
+    session: Arc<str>,
+    /// Held by each sign-in, so wrong passwords are tried one at a time.
+    sign_ins: Arc<tokio::sync::Mutex<()>>,
     /// One lock per notebook slug, held by anything that changes the notebook
     /// or syncs its index, so two requests never rewrite notebook.toml or index
     /// one source at once. Per notebook, so a slow ingest blocks only its own.
@@ -93,6 +99,8 @@ impl AppState {
 pub fn router(config: Config) -> Router {
     let state = AppState {
         library: Arc::new(config.library),
+        session: session_for(&config.token).into(),
+        sign_ins: Arc::default(),
         token: config.token.into(),
         locks: Arc::default(),
         settings: Arc::new(RwLock::new(config.settings)),
@@ -197,6 +205,7 @@ pub fn router(config: Config) -> Router {
         )
         .layer(DefaultBodyLimit::max(UPLOAD_LIMIT))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token))
+        .route("/login", post(sign_in))
         .fallback(|| async { ApiError(StatusCode::NOT_FOUND, "No such API route.".into()) })
         .with_state(state);
     let app = Router::new().nest("/api", api);
@@ -225,14 +234,36 @@ pub fn new_token() -> String {
         .collect()
 }
 
+const SESSION_COOKIE: &str = "bowerbird_session";
+const SESSION_SECONDS: u32 = 30 * 24 * 60 * 60;
+
+fn session_for(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(format!("bowerbird session {token}"))
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|c| c.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))
+}
+
 async fn require_token(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    let presented = request
-        .headers()
+    let headers = request.headers();
+    let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or_default();
-    if constant_time_eq(presented.as_bytes(), state.token.as_bytes()) {
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let signed_in = bearer.is_some_and(|t| constant_time_eq(t.as_bytes(), state.token.as_bytes()))
+        || session_cookie(headers)
+            .is_some_and(|s| constant_time_eq(s.as_bytes(), state.session.as_bytes()));
+    if signed_in {
         next.run(request).await
     } else {
         ApiError(
@@ -241,6 +272,38 @@ async fn require_token(State(state): State<AppState>, request: Request, next: Ne
         )
         .into_response()
     }
+}
+
+#[derive(serde::Deserialize)]
+struct SignIn {
+    password: String,
+}
+
+/// Trades the password, which is the token, for a cookie that keeps this
+/// browser signed in.
+async fn sign_in(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Body(body): Body<SignIn>,
+) -> Response {
+    // A password someone chose can be guessable: wrong ones wait their turn
+    // and a second each, so guesses come one a second however many are sent.
+    let _turn = state.sign_ins.lock().await;
+    if !constant_time_eq(body.password.as_bytes(), state.token.as_bytes()) {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        return ApiError(StatusCode::UNAUTHORIZED, "Wrong password.".into()).into_response();
+    }
+    // Over plain HTTP a browser drops a Secure cookie; a reverse proxy serving
+    // HTTPS says so in this header.
+    let secure = headers
+        .get("x-forwarded-proto")
+        .is_some_and(|p| p == "https");
+    let cookie = format!(
+        "{SESSION_COOKIE}={}; Path=/api; Max-Age={SESSION_SECONDS}; HttpOnly; SameSite=Strict{}",
+        state.session,
+        if secure { "; Secure" } else { "" }
+    );
+    ([(header::SET_COOKIE, cookie)], StatusCode::NO_CONTENT).into_response()
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -444,13 +507,24 @@ mod tests {
         token: Option<&str>,
         body: &str,
     ) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let auth = token
             .map(|t| format!("Authorization: Bearer {t}\r\n"))
             .unwrap_or_default();
+        send(addr, method, path, &auth, body).await
+    }
+
+    /// `headers` are whole lines, each ending in CRLF.
+    async fn send(
+        addr: std::net::SocketAddr,
+        method: &str,
+        path: &str,
+        headers: &str,
+        body: &str,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let request = format!(
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
         stream.write_all(request.as_bytes()).await.unwrap();
@@ -462,6 +536,41 @@ mod tests {
     async fn status(addr: std::net::SocketAddr, token: Option<&str>) -> String {
         let response = call(addr, "GET", "/api/notebooks", token, "").await;
         response.lines().next().unwrap_or_default().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_cookie_opens_the_api_without_the_token() {
+        let addr = serve("sign-in").await;
+        let wrong = call(addr, "POST", "/api/login", None, r#"{"password":"guess"}"#).await;
+        assert!(wrong.starts_with("HTTP/1.1 401"), "{wrong}");
+        let right = call(
+            addr,
+            "POST",
+            "/api/login",
+            None,
+            r#"{"password":"right-token"}"#,
+        )
+        .await;
+        let cookie = right
+            .lines()
+            .find_map(|l| l.strip_prefix("set-cookie: "))
+            .unwrap();
+        assert!(cookie.contains("HttpOnly"), "{cookie}");
+        assert!(cookie.contains("SameSite=Strict"), "{cookie}");
+        assert!(!cookie.contains("right-token"), "{cookie}");
+        let session = cookie.split(';').next().unwrap();
+        let read = send(
+            addr,
+            "GET",
+            "/api/notebooks",
+            &format!("Cookie: {session}\r\n"),
+            "",
+        )
+        .await;
+        assert!(read.starts_with("HTTP/1.1 200"), "{read}");
+        let forged = "Cookie: bowerbird_session=right-token\r\n";
+        let refused = send(addr, "GET", "/api/notebooks", forged, "").await;
+        assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
     }
 
     #[tokio::test]
@@ -552,6 +661,8 @@ mod tests {
         let state = AppState {
             library: Arc::new(library.clone()),
             token: "right-token".into(),
+            session: session_for("right-token").into(),
+            sign_ins: Arc::default(),
             locks: Arc::default(),
             settings: Arc::new(RwLock::new(Settings::default())),
             settings_path: Arc::new(dir.join("settings.toml")),

@@ -1,6 +1,6 @@
 [package]
 name = "bowerbird-desktop"
-version = "0.1.4"
+version = "0.1.5"
 authors = ["jolovicdev"]
 edition.workspace = true
 license.workspace = true

@@ -542,7 +542,7 @@ dependencies = [
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "webpki-root-certs",
- "zip",
+ "zip 9.5.1",
 ]
 
 [[package]]
@@ -975,6 +975,15 @@ checksum = "86919cef3e37b9356ccf54d4421208c17ecfda01beae61393e7ffd72916c0ef1"
 dependencies = [
  "log",
  "web-sys",
+]
+
+[[package]]
+name = "constant_time_eq"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9eb6feb175df65d0a3ccd3e73484e940d0ac664e8034f0519fd49a93db3071d9"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]
@@ -3674,25 +3683,31 @@ dependencies = [
 
 [[package]]
 name = "oar-ocr"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "720192d8d9e1b2ef52019b9c05848d6ee44170893da3b7cc46a4f89aa8eeb988"
+checksum = "5efb1b5c83d5e18cf0082b4222b420b3c193694bbd2d27e78fbad5ee29ab517d"
 dependencies = [
  "image",
  "imageproc",
  "oar-ocr-core",
  "oar-ocr-derive",
+ "ort",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "tracing",
+ "unicode-bidi",
+ "unicode-normalization",
+ "unicode-properties",
+ "zip 8.6.0",
 ]
 
 [[package]]
 name = "oar-ocr-core"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89910f812d287301d9ab246587133920b6385cd5c861795bb0b8953b9fa694ef"
+checksum = "1814eaa88485c76f152d282415018949125b4c303b82e4a1960c1a68d63588a1"
 dependencies = [
  "clipper2-rust",
  "image",
@@ -3715,9 +3730,9 @@ dependencies = [
 
 [[package]]
 name = "oar-ocr-derive"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22c9ac322a07c0c45f09d9821935859cc65ba023a558e1109dabbc895649d3fb"
+checksum = "ceafd62a41b4f895eb4917ea1530e29811f7a5e881545deb0bc163dc26fb2499"
 dependencies = [
  "darling 0.24.1",
  "proc-macro2",
@@ -3969,9 +3984,9 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "opus-pure"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4de7c2ad44427a636b27bf0b03eb29e713775ba1b45ff31a0618c19ee5adb215"
+checksum = "5afacd236411dddcc284983066ef66b27e306e53ce4de85cd745b3da9be8a0be"
 
 [[package]]
 name = "ort"
@@ -6140,9 +6155,9 @@ dependencies = [
 
 [[package]]
 name = "text-splitter"
-version = "0.33.1"
+version = "0.33.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a06fb87dc7e5d56c10eea51b7151c8ebf340cbc46e5a926922fa489dc719307"
+checksum = "d6e9c442e21453a2bdfcfc07e6a750f12fec7cf3d00444c52aaea174a343ff5d"
 dependencies = [
  "ahash",
  "auto_enums",
@@ -6626,6 +6641,12 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "typed-path"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
+
+[[package]]
+name = "typed-path"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ce898823d8cd0f028662d2f349694b1af0a5cc9be83f1d213a00d3147445e1e"
@@ -6647,6 +6668,12 @@ name = "unicase"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
+
+[[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-ident"
@@ -6671,6 +6698,12 @@ checksum = "43f613e4fa046e69818dd287fdc4bc78175ff20331479dab6e1b0f98d57062de"
 dependencies = [
  "smallvec",
 ]
+
+[[package]]
+name = "unicode-properties"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993ad287eb20e8ba755312801cfe1413e0f25d604075863acaddca10b04c1833"
 
 [[package]]
 name = "unicode-segmentation"
@@ -7671,6 +7704,20 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zerotrie"
@@ -7709,18 +7756,34 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.1.3"
+version = "8.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1156b39d142a34b999c2310a50455e0cb3760bf7efad0122f796d813bee26ccb"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
 dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap 2.14.2",
+ "memchr",
+ "typed-path 0.12.4",
+]
+
+[[package]]
+name = "zip"
+version = "9.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3476fd497ac8af5b1ec7b51acab7bef380f7e8dd8e0487595bafd839417a302"
+dependencies = [
+ "constant_time_eq",
  "crc32fast",
  "flate2",
  "getrandom 0.4.3",
  "indexmap 2.14.2",
+ "libc",
  "memchr",
  "nix",
- "typed-path",
+ "typed-path 0.13.0",
  "windows-sys 0.61.2",
+ "zeroize",
 ]
 
 [[package]]

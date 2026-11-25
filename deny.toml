@@ -34,4 +34,5 @@ ignore = [
     { id = "RUSTSEC-2024-0370", reason = "build-time macro of gtk-rs 0.18, which Tauri pins" },
     { id = "RUSTSEC-2024-0436", reason = "build-time macro reached through image's OpenEXR decoder" },
     { id = "RUSTSEC-2026-0192", reason = "font parsing in imageproc, which OCR never calls" },
+    { id = "RUSTSEC-2026-0543", reason = "dates of PDF annotations and form fields in pdfium-render, which Bowerbird never reads" },
 ]

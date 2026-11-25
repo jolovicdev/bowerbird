@@ -11,6 +11,10 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # These releases depend on zip 8.6, which has advisories for archive
+      # extraction. oar-ocr 0.11 depends on a zip release without them.
+      - dependency-name: "oar-ocr"
+        versions: [">= 0.10.1, < 0.11"]
   - package-ecosystem: npm
     directory: /ui
     schedule:

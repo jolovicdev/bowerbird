@@ -301,24 +301,40 @@ debug key when that file is missing.
 cargo test --workspace
 npm --prefix ui run check
 ui/node_modules/.bin/playwright install chromium     # once
+cargo build -p bowerbird-server && npm --prefix ui run test:flows
 cargo build -p bowerbird-server && npm --prefix ui run test:e2e
 BOWERBIRD_LIVE=1 cargo test -p bowerbird-core --test live
 BOWERBIRD_LIVE=1 cargo test -p bowerbird-core --lib -- "ocr::" "embed::" "retrieve::"
+BOWERBIRD_LIVE=1 cargo test -p bowerbird-core --lib -- "youtube::" "search::"
 ```
 
-The end-to-end tests and the live test ask the default model real questions,
-so they need `DEEPSEEK_API_KEY`. The end-to-end tests serve the UI from
-`ui/build`, so build it first. The live test also checks YouTube captions,
-web page extraction and DuckDuckGo; the last line downloads the OCR and
-search models and reads a scanned page.
+`test:flows` runs the browser tests that need no API key: search, export,
+the model list, profiles, and what the page does when a request goes wrong.
+The app answers from a stand-in model server (`ui/tests/model-server.mjs`)
+and keeps its library and settings in a throwaway folder. `test:e2e` and the
+live test ask the default model real questions, so they need
+`DEEPSEEK_API_KEY`. Both browser suites serve the UI from `ui/build`, so
+build it first.
+
+The live test also checks YouTube captions and playlists, web page extraction
+and DuckDuckGo. The line after it downloads the OCR and search models and
+reads a scanned page. The last line tries each way of reading YouTube and
+DuckDuckGo by itself: the two caption clients, the playlist feed, and both
+result pages. A feature with a second way keeps working when the first one
+breaks, and only that line says so.
+
+`cargo test -p bowerbird-core --release --lib -- --ignored vector_search_at_scale --nocapture`
+times the search by meaning at 10k, 100k and 500k passages.
 
 ### Continuous integration
 
 - `.github/workflows/ci.yml`, on every push and pull request: formatting,
-  clippy with warnings as errors, the workspace tests, the UI type check, and
-  `cargo deny` for licenses (`deny.toml`) and advisories.
-- `.github/workflows/live.yml`, daily: the live tests and the end-to-end
-  tests. Needs the `DEEPSEEK_API_KEY` repository secret.
+  clippy with warnings as errors, the workspace tests, the browser tests that
+  need no API key, the UI type check, and `cargo deny` for licenses
+  (`deny.toml`) and advisories.
+- `.github/workflows/live.yml`, daily: the live tests, each reader of YouTube
+  and DuckDuckGo by itself, and the end-to-end tests. Needs the
+  `DEEPSEEK_API_KEY` repository secret.
 - `.github/workflows/release.yml`, on `v*` tags and manual runs: the Linux,
   macOS, Windows and Android builds and the Docker image; a tag publishes the
   builds as a GitHub release and the image to `ghcr.io/jolovicdev/bowerbird`. It also runs weekly without macOS, whose runner minutes cost ten

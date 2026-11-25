@@ -14,6 +14,8 @@ const library = mkdtempSync(join(tmpdir(), 'bowerbird-e2e-'));
 
 export default defineConfig({
 	testDir: 'tests',
+	// The tests in flows.spec.ts need no key and have a config of their own.
+	testMatch: 'notebook.spec.ts',
 	timeout: 180_000,
 	workers: 1,
 	use: { baseURL: `http://${host}:${port}` },

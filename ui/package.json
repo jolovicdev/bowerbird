@@ -9,7 +9,8 @@
     "dev": "vite dev",
     "build": "vite build",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:flows": "playwright test -c playwright.flows.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.64",

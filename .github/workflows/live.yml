@@ -15,6 +15,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   BOWERBIRD_PDFIUM_DIR: ${{ github.workspace }}/vendor/pdfium/lib
+  # whisper.cpp otherwise compiles for the CPU of the machine that builds it,
+  # and a cached or published build can crash on a different one.
+  GGML_NATIVE: "OFF"
   DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
 jobs:
@@ -26,7 +29,9 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: scripts/fetch-pdfium.sh
-      - run: cargo test -p bowerbird-core --test live --locked
+      # --nocapture lets the warning of a skipped check reach the run's page:
+      # YouTube and DuckDuckGo turn away many of GitHub's addresses.
+      - run: cargo test -p bowerbird-core --test live --locked -- --nocapture
         env:
           BOWERBIRD_LIVE: "1"
       - name: Model downloads, OCR and search by meaning
@@ -37,7 +42,7 @@ jobs:
       # has a second way keeps working when the first one breaks, and only
       # these say that it broke.
       - name: Each reader of YouTube and DuckDuckGo
-        run: cargo test -p bowerbird-core --lib --locked -- "youtube::" "search::"
+        run: cargo test -p bowerbird-core --lib --locked -- --nocapture "youtube::" "search::"
         env:
           BOWERBIRD_LIVE: "1"
 
@@ -49,6 +54,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y cmake clang
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          # GGML_NATIVE changes what is compiled, so it is part of the cache key.
+          env-vars: GGML
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22

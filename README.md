@@ -321,7 +321,10 @@ and DuckDuckGo. The line after it downloads the OCR and search models and
 reads a scanned page. The last line tries each way of reading YouTube and
 DuckDuckGo by itself: the two caption clients, the playlist feed, and both
 result pages. A feature with a second way keeps working when the first one
-breaks, and only that line says so.
+breaks, and only that line says so. YouTube and DuckDuckGo turn away many
+data center addresses. A check that is refused or times out is skipped and
+prints a `::warning::` line, which GitHub shows on the run; a page that
+arrives and can't be read fails.
 
 `cargo test -p bowerbird-core --release --lib -- --ignored vector_search_at_scale --nocapture`
 times the search by meaning at 10k, 100k and 500k passages.

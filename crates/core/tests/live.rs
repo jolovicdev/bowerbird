@@ -40,6 +40,29 @@ fn live() -> bool {
     on
 }
 
+/// Whether a service turned this machine away or was too slow that day, as
+/// YouTube and DuckDuckGo do to data center addresses. That says nothing
+/// about Bowerbird's readers, so the check is skipped with a warning that the
+/// workflow run shows. Every other error fails the test: a reader that is out
+/// of date gets an answer it can't use, not a refusal.
+fn turned_away(check: &str, error: &bowerbird_core::Error) -> bool {
+    const SIGNS: [&str; 7] = [
+        "(403",
+        "(429",
+        "not a bot",
+        "refusing automated",
+        "limiting searches",
+        "took too long",
+        "took longer",
+    ];
+    let message = error.to_string();
+    let away = SIGNS.iter().any(|sign| message.contains(sign));
+    if away {
+        println!("::warning title=Skipped: {check}::{message}");
+    }
+    away
+}
+
 #[tokio::test]
 async fn answers_with_a_verified_citation() {
     if !live() {
@@ -96,7 +119,11 @@ async fn youtube_captions_still_download() {
     if !live() {
         return;
     }
-    let transcript = youtube::transcript("dQw4w9WgXcQ").await.unwrap();
+    let transcript = match youtube::transcript("dQw4w9WgXcQ").await {
+        Ok(transcript) => transcript,
+        Err(e) if turned_away("YouTube captions", &e) => return,
+        Err(e) => panic!("{e}"),
+    };
     assert!(
         transcript.markdown.to_lowercase().contains("never gonna"),
         "captions came back without the lyrics: {}",
@@ -113,8 +140,8 @@ async fn youtube_playlists_still_list_their_videos() {
     let playlist = youtube::playlist("PLUl4u3cNGP61Oq3tWYp6V_F-5jb5L2iHb")
         .await
         .unwrap();
-    // The feed standing in means the page no longer has a shape Bowerbird
-    // reads: playlists still work, but only their first videos.
+    // The feed standing in means the page has a shape Bowerbird can't read:
+    // playlists work, but only their first videos.
     assert!(!playlist.cut_short, "the playlist page has changed shape");
     // A lecture may be taken down one day; most of them staying is enough.
     assert!(playlist.videos.len() >= 20, "{:?}", playlist.videos);
@@ -168,9 +195,11 @@ async fn duckduckgo_still_returns_results() {
     if !live() {
         return;
     }
-    let hits = search::search(&Settings::default(), "Peace of Westphalia 1648")
-        .await
-        .unwrap();
+    let hits = match search::search(&Settings::default(), "Peace of Westphalia 1648").await {
+        Ok(hits) => hits,
+        Err(e) if turned_away("DuckDuckGo search", &e) => return,
+        Err(e) => panic!("{e}"),
+    };
     assert!(!hits.is_empty());
     assert!(hits.iter().all(|h| h.url.starts_with("http")), "{hits:?}");
 }

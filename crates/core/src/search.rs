@@ -496,13 +496,19 @@ mod tests {
         let http = client().unwrap();
         for (address, parse) in DUCKDUCKGO_PAGES {
             let url = url(address, &[("q", "Peace of Westphalia 1648")]).unwrap();
-            let page = text(|| http.get(url.clone()), "DuckDuckGo").await.unwrap();
-            // A refusal says nothing about the page's layout, and the search
-            // itself is checked in tests/live.rs.
-            if page.contains(DUCKDUCKGO_REFUSAL) {
-                eprintln!("skipped: {address} refused the search");
-                continue;
-            }
+            // A page that didn't arrive, or a refusal, says nothing about the
+            // page's layout. The workflow run shows the warning.
+            let page = match text(|| http.get(url.clone()), "DuckDuckGo").await {
+                Ok(page) if !page.contains(DUCKDUCKGO_REFUSAL) => page,
+                Ok(_) => {
+                    println!("::warning title=Skipped: {address}::It refused the search.");
+                    continue;
+                }
+                Err(e) => {
+                    println!("::warning title=Skipped: {address}::{e}");
+                    continue;
+                }
+            };
             let hits = parse(&page).unwrap_or_default();
             assert!(hits.len() >= 3, "{address} gave {} results", hits.len());
             assert!(

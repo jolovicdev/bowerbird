@@ -696,12 +696,16 @@ mod tests {
 
     /// Calls YouTube, so it runs only with BOWERBIRD_LIVE=1. Each app is
     /// tried by itself: while one still gets captions, `transcript` hides
-    /// that the other has stopped.
+    /// that the other has stopped. An app turned away while another reads is
+    /// out of date. All of them turned away means YouTube refuses this
+    /// machine, as it does data center addresses, so the check is skipped
+    /// with a warning that the workflow run shows.
     #[tokio::test]
     async fn each_app_still_reads_a_video_s_captions() {
         if !live() {
             return;
         }
+        let mut refusals = Vec::new();
         for app in &CLIENTS {
             match transcript_as(&http(), app, "dQw4w9WgXcQ").await {
                 Ok(Attempt::Read(transcript)) => assert!(
@@ -709,10 +713,18 @@ mod tests {
                     "{} got captions without the lyrics",
                     app.name
                 ),
-                Ok(Attempt::Refused(e)) => panic!("YouTube turned {} away: {e}", app.name),
+                Ok(Attempt::Refused(e)) => refusals.push(format!("{}: {e}", app.name)),
                 Err(e) => panic!("{} failed: {e}", app.name),
             }
         }
+        if refusals.len() == CLIENTS.len() {
+            println!(
+                "::warning title=Skipped: YouTube caption apps::{}",
+                refusals.join(" ")
+            );
+            return;
+        }
+        assert!(refusals.is_empty(), "YouTube turned away {refusals:?}");
     }
 
     /// Calls YouTube, so it runs only with BOWERBIRD_LIVE=1. The feed is what

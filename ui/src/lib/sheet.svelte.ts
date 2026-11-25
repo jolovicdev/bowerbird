@@ -8,13 +8,14 @@ import { page } from '$app/state';
 import { api, describe, passageOrd, type Citation } from '#lib/api.ts';
 import type { Entry } from '#lib/components/SourcePane.svelte';
 
-/** Cited passages, a source, a note, a study set, or a report being written. */
+/** Cited passages, a source, a note, a study set, a draft report, or notebook search. */
 export type Pane =
 	| { citations: Citation[]; entries: Entry[] }
-	| { sourceId: string }
+	| { sourceId: string; ord?: number; highlight?: string }
 	| { noteId: string }
 	| { studyId: string }
-	| { draft: true };
+	| { draft: true }
+	| { search: true };
 
 export class SheetState {
 	pane = $state<Pane | null>(null);
@@ -70,6 +71,13 @@ export class SheetState {
 		this.openCitations(citations, el);
 		this.back = from;
 		this.#opener = keep;
+	};
+
+	/** Opens another pane from inside the sheet (e.g. from search results), keeping the way back. */
+	openSub = (next: Pane) => {
+		const from = this.pane;
+		this.#show(next);
+		this.back = from;
 	};
 
 	goBack = () => {

@@ -47,8 +47,8 @@
 		chat: string | null;
 		notes: NoteSummary[];
 		studies: StudySummary[];
-		/** Study sets being written right now. */
-		writing?: StudyKind[];
+		/** Study sets being written right now, each with how far along it is. */
+		writing?: { kind: StudyKind; detail: string }[];
 		/** Names of reports being written right now. */
 		reports?: string[];
 		/** Below the three-column width, the contents open over the page. */
@@ -223,9 +223,10 @@
 								</button>
 							</li>
 						{/each}
-						{#each writing as kind, i (i)}
+						{#each writing as run, i (i)}
 							<li class="pending">
-								<span class="title">{WRITING[kind]}</span>
+								<span class="title">{WRITING[run.kind]}</span>
+								{#if run.detail}<span class="meta">{run.detail}</span>{/if}
 								<span class="progress" aria-hidden="true"></span>
 							</li>
 						{/each}

@@ -1,21 +1,25 @@
 //! Study sets: flashcards, quizzes, mind maps, tables, slides, infographics and audio overviews.
 
+use std::convert::Infallible;
 use std::sync::PoisonError;
 
 use axum::Json;
 use axum::extract::{Path as UrlPath, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use bowerbird_core::ask::{self, Citation};
 use bowerbird_core::notebook::Notebook;
 use bowerbird_core::pptx;
 use bowerbird_core::study::{self, Difficulty, Kind, StudySet};
+use futures::Stream;
 use serde::{Deserialize, Serialize};
 
+use crate::chats::send_event;
 use crate::speech::{Progress, record_audio};
 use crate::{
-    ApiError, ApiResult, AppState, Body, blocking, detached, open_notebook, prepare, unix_now,
-    write_json,
+    ApiError, ApiResult, AppState, Body, blocking, detached, notebook_dir, open_notebook, prepare,
+    unix_now, write_json,
 };
 
 #[derive(Serialize)]
@@ -176,11 +180,7 @@ pub(crate) struct NewStudy {
     format: study::AudioFormat,
 }
 
-pub(crate) async fn create_study(
-    State(state): State<AppState>,
-    UrlPath(slug): UrlPath<String>,
-    Body(body): Body<NewStudy>,
-) -> ApiResult<Json<StudyView>> {
+fn build_study_request(body: NewStudy) -> ApiResult<study::Request> {
     // A mind map has no count; its size comes from the sources.
     let (usual, most) = match body.kind {
         Kind::Flashcards => (20, 40),
@@ -195,27 +195,98 @@ pub(crate) async fn create_study(
             "Describe the table, such as \"battles: date, place, commanders, outcome\".".into(),
         ));
     }
-    let request = study::Request {
+    Ok(study::Request {
         kind: body.kind,
         count: body.count.unwrap_or(usual).clamp(3, most),
         difficulty: body.difficulty,
         topic: body.topic,
         describe: body.describe,
         format: body.format,
-    };
-    detached(study_job(state, slug, request)).await
+    })
+}
+
+pub(crate) async fn create_study(
+    State(state): State<AppState>,
+    UrlPath(slug): UrlPath<String>,
+    Body(body): Body<NewStudy>,
+) -> ApiResult<Json<StudyView>> {
+    let request = build_study_request(body)?;
+    detached(study_job(state, slug, request, None)).await
+}
+
+/// Streams progress while writing a study set as server-sent events: `stage`
+/// (`passages` / `thinking` / `writing`), `thinking` (reasoning chunks), then
+/// `done` (`StudyView`) or `error`. Detached so the set finishes and saves
+/// even if the reader navigates away.
+pub(crate) async fn create_study_stream(
+    State(state): State<AppState>,
+    UrlPath(slug): UrlPath<String>,
+    Body(body): Body<NewStudy>,
+) -> ApiResult<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
+    let request = build_study_request(body)?;
+    notebook_dir(&state.library, &slug)?;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SseEvent>();
+    tokio::spawn(async move {
+        match study_job(state, slug, request, Some(tx.clone())).await {
+            Ok(Json(view)) => send_event(&tx, "done", &view),
+            Err(ApiError(_, message)) => {
+                send_event(&tx, "error", &serde_json::json!({ "error": message }));
+            }
+        }
+    });
+    let events =
+        futures::stream::unfold(
+            rx,
+            |mut rx| async move { rx.recv().await.map(|e| (Ok(e), rx)) },
+        );
+    Ok(Sse::new(events).keep_alive(KeepAlive::default()))
 }
 
 async fn study_job(
     state: AppState,
     slug: String,
     request: study::Request,
+    tx: Option<tokio::sync::mpsc::UnboundedSender<SseEvent>>,
 ) -> ApiResult<Json<StudyView>> {
-    let model = state.settings().chat_model().to_string();
-    let client = ask::client(state.settings.clone())?;
+    if let Some(tx) = &tx {
+        send_event(tx, "stage", &serde_json::json!({ "stage": "passages" }));
+    }
     let (nb, ctx, prompt) =
         prepare(&state, &slug, &request.topic, study::instruction(&request)).await?;
-    let set = study::write(&client, &model, &request, prompt, &ctx, unix_now()).await?;
+    let (model, thinking) = state.settings().for_notebook(&nb.chat);
+    let client = ask::client_with_thinking(state.settings.clone(), thinking)?;
+    let mut announced_thinking = false;
+    let mut last_chars_reported = 0usize;
+    let set = study::write_streaming(
+        &client,
+        &model,
+        &request,
+        prompt,
+        &ctx,
+        unix_now(),
+        |thought| {
+            if let Some(tx) = &tx {
+                if !announced_thinking {
+                    announced_thinking = true;
+                    send_event(tx, "stage", &serde_json::json!({ "stage": "thinking" }));
+                }
+                send_event(tx, "thinking", thought);
+            }
+        },
+        |chars| {
+            if let Some(tx) = &tx
+                && (last_chars_reported == 0 || chars.saturating_sub(last_chars_reported) >= 200)
+            {
+                last_chars_reported = chars;
+                send_event(
+                    tx,
+                    "stage",
+                    &serde_json::json!({ "stage": "writing", "chars": chars }),
+                );
+            }
+        },
+    )
+    .await?;
     let (view, recorder) = blocking({
         let state = state.clone();
         let slug = slug.clone();

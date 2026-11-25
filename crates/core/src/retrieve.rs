@@ -4,10 +4,12 @@
 
 use std::collections::{HashMap, HashSet};
 
+use serde::Serialize;
+
 use crate::Result;
 use crate::embed::Embedder;
 use crate::index::{ChunkRow, Hit, Index, query_terms};
-use crate::notebook::Notebook;
+use crate::notebook::{Notebook, Source};
 
 pub const HITS: usize = 8;
 /// Keyword candidates considered when ranking.
@@ -342,6 +344,157 @@ pub fn outline(
     Ok(out)
 }
 
+/// One passage hit returned by interactive notebook/library search.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PassageHit {
+    pub label: String,
+    pub source_id: String,
+    pub source_title: String,
+    pub letter: String,
+    pub ord: u32,
+    pub page_start: Option<u32>,
+    pub section: String,
+    pub snippet: String,
+    pub score: f64,
+}
+
+/// Similarity below which a passage found only by meaning is left out of
+/// interactive search. The search model always has a nearest passage, so
+/// without a floor every query finds something. Measured on a notebook of 12
+/// English and Serbian sources: the best passage scored 0.32 to 0.76 for 14
+/// keyword and concept queries, and 0.08 to 0.24 for 13 off-topic and
+/// nonsense ones. Answers don't use it: `rank` wants the nearest passages
+/// whatever their score.
+const MEANING_FLOOR: f64 = 0.28;
+
+/// Characters of a passage shown with a search hit.
+const SNIPPET_CHARS: usize = 220;
+
+/// The query as a vector for `search_passages`, or None while the notebook
+/// has no vectors or the search model isn't downloaded.
+pub fn query_vector(index: &Index, query: &str) -> Result<Option<Vec<f32>>> {
+    // Loading the model takes a second or two; skip it while nothing is embedded.
+    if index.vector_count()? == 0 {
+        return Ok(None);
+    }
+    Embedder::shared()
+        .map(|embedder| embedder.query(query))
+        .transpose()
+}
+
+/// Interactive search over a notebook's passages, without a model call:
+/// keyword hits fused with the passages near `vector` in meaning. `vector`
+/// comes from `query_vector`, which a search over several notebooks computes
+/// once. When neither finds anything, passages that contain the query as
+/// typed are returned, which finds part of a word.
+pub fn search_passages(
+    index: &Index,
+    nb: &Notebook,
+    query: &str,
+    vector: Option<&[f32]>,
+    limit: usize,
+    include_excluded: bool,
+) -> Result<Vec<PassageHit>> {
+    let query = query.trim();
+    if query.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let filter = (!include_excluded && nb.sources.iter().any(|s| s.excluded))
+        .then(|| nb.included().map(|s| s.id.as_str()).collect::<Vec<&str>>());
+    let fetch_limit = limit.max(CANDIDATES);
+    let keyword = match &filter {
+        Some(ids) => index.search_in(query, fetch_limit, ids)?,
+        None => index.search(query, fetch_limit)?,
+    };
+    let mut dense = match vector {
+        Some(vector) => index.dense_search(vector, fetch_limit, filter.as_deref())?,
+        None => Vec::new(),
+    };
+    dense.retain(|hit| hit.score >= MEANING_FLOOR);
+    let mut out = Vec::new();
+    for hit in fuse(&keyword, &dense).into_iter().take(limit) {
+        let Some(source) = nb.source(&hit.source_id) else {
+            continue;
+        };
+        if let Some(row) = index.chunk(&hit.source_id, hit.ord)? {
+            out.push(passage_hit(source, row, query, hit.score));
+        }
+    }
+    if !out.is_empty() {
+        return Ok(out);
+    }
+    let needle = query.to_lowercase();
+    let searched = nb
+        .sources
+        .iter()
+        .filter(|s| include_excluded || !s.excluded);
+    for source in searched {
+        for row in index.chunks_between(&source.id, 0, usize::MAX)? {
+            if row.text.to_lowercase().contains(&needle)
+                || row.section.to_lowercase().contains(&needle)
+            {
+                out.push(passage_hit(source, row, query, 0.1));
+                if out.len() == limit {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn passage_hit(source: &Source, row: ChunkRow, query: &str, score: f64) -> PassageHit {
+    PassageHit {
+        label: format!("{}{}", source.letter, row.ord),
+        source_id: source.id.clone(),
+        source_title: source.title.clone(),
+        letter: source.letter.clone(),
+        ord: row.ord,
+        page_start: row.page_start,
+        snippet: snippet_around(&row.text, query, SNIPPET_CHARS),
+        section: row.section,
+        score,
+    }
+}
+
+/// Short single-line excerpt centered around the first match of `query` (or
+/// its first matching term), falling back to the start of `text`.
+pub fn snippet_around(text: &str, query: &str, max_chars: usize) -> String {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let total = flat.chars().count();
+    if total <= max_chars {
+        return flat;
+    }
+    let lower = flat.to_lowercase();
+    let needle = query.trim().to_lowercase();
+    let match_byte = (!needle.is_empty())
+        .then(|| lower.find(&needle))
+        .flatten()
+        .or_else(|| {
+            query_terms(query)
+                .into_iter()
+                .find_map(|term| lower.find(&term))
+        });
+    let match_char = match_byte.map_or(0, |b| lower[..b].chars().count());
+    let start_char = match_char.saturating_sub(max_chars / 3);
+    let end_char = (start_char + max_chars).min(total);
+    let start_char = end_char.saturating_sub(max_chars);
+    let excerpt: String = flat
+        .chars()
+        .skip(start_char)
+        .take(end_char - start_char)
+        .collect();
+    let mut out = String::new();
+    if start_char > 0 {
+        out.push('…');
+    }
+    out.push_str(excerpt.trim());
+    if end_char < total {
+        out.push('…');
+    }
+    out
+}
+
 /// "B§12" -> section 12 of source B.
 pub fn parse_section_id(nb: &Notebook, id: &str) -> Option<SectionRef> {
     let (letter, ord) = id.trim().split_once('§')?;
@@ -503,5 +656,69 @@ mod tests {
         assert!(passages.iter().all(|p| p.label.starts_with('B')));
         let overview = gather_overview(&index, &nb).unwrap().passages;
         assert!(!overview.is_empty() && overview.iter().all(|p| p.label.starts_with('B')));
+    }
+
+    #[test]
+    fn interactive_passage_search_finds_keywords_and_partial_substrings() {
+        let dir = std::env::temp_dir().join(format!("bowerbird-search-p-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut nb = Notebook::open_or_create(&dir, "Birds").unwrap();
+        nb.add_text(
+            "Satin",
+            "# Courtship\nThe satin bowerbird gathers ultramarine bottle caps.",
+        )
+        .unwrap();
+        let (index, _) = Index::open_synced(&nb).unwrap();
+        let hits = search_passages(&index, &nb, "ultramarine", None, 5, false).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].label, "A0");
+        assert!(hits[0].snippet.contains("ultramarine"));
+        // Substring fallback finds fragments FTS5 tokenization doesn't match.
+        let sub = search_passages(&index, &nb, "ramari", None, 5, false).unwrap();
+        assert_eq!(sub.len(), 1);
+        assert_eq!(sub[0].label, "A0");
+    }
+
+    /// Downloads the search model (about 200 MB), so it runs only with
+    /// BOWERBIRD_LIVE=1.
+    #[tokio::test]
+    async fn interactive_search_by_meaning_leaves_out_passages_far_from_the_query() {
+        if std::env::var("BOWERBIRD_LIVE").as_deref() != Ok("1") {
+            eprintln!("skipped: set BOWERBIRD_LIVE=1 to download the search model");
+            return;
+        }
+        crate::embed::download_for_tests().await;
+        let dir = std::env::temp_dir().join(format!("bowerbird-floor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut nb = Notebook::open_or_create(&dir, "Birds").unwrap();
+        nb.add_text(
+            "Tax",
+            "Value added tax is charged at each stage of production.",
+        )
+        .unwrap();
+        nb.add_text(
+            "Bowers",
+            "The male gathers ultramarine bottle caps and berries to decorate his bower.",
+        )
+        .unwrap();
+        let (mut index, _) = Index::open_synced(&nb).unwrap();
+        let rows = index.unembedded(10).unwrap();
+        let vectors = Embedder::shared().unwrap().documents(&rows).unwrap();
+        index.store_vectors(&rows, &vectors).unwrap();
+        let labels = |query: &str| -> Vec<String> {
+            let vector = query_vector(&index, query).unwrap();
+            assert!(vector.is_some(), "the notebook has vectors");
+            search_passages(&index, &nb, query, vector.as_deref(), 5, false)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.label)
+                .collect()
+        };
+        // No word in common with the source: only its meaning finds it, and
+        // the tax passage is too far from the question to come along.
+        assert_eq!(labels("Which colours does the bird collect?"), ["B0"]);
+        assert!(labels("asdfgh").is_empty());
+        // Part of a word matches no keyword and nothing in meaning.
+        assert_eq!(labels("ramari"), ["B0"]);
     }
 }

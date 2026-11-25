@@ -63,6 +63,145 @@ pub fn video_id(url: &str) -> Option<String> {
     valid.then_some(id)
 }
 
+/// The playlist id in a YouTube playlist URL (`/playlist?list=...`).
+/// Regular watch links that happen to carry `&list=` are left as single videos.
+pub fn playlist_id(url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    let host = url.host_str()?;
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    let host = host.strip_prefix("m.").unwrap_or(host);
+    if !matches!(host, "youtube.com" | "music.youtube.com") {
+        return None;
+    }
+    let first = url.path_segments()?.next()?;
+    if first != "playlist" {
+        return None;
+    }
+    let id = url.query_pairs().find(|(k, _)| k == "list")?.1.into_owned();
+    let valid = (10..=64).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    valid.then_some(id)
+}
+
+/// The videos of a public playlist.
+pub struct Playlist {
+    /// Watch addresses, in the playlist's order.
+    pub videos: Vec<String>,
+    /// YouTube's page couldn't be read, and the playlist's feed, which
+    /// stood in, was full: the playlist may hold more videos than these.
+    pub cut_short: bool,
+}
+
+/// Most videos taken from one playlist.
+const MAX_PLAYLIST_VIDEOS: usize = 50;
+
+/// How many videos a playlist's feed lists at most.
+const FEED_VIDEOS: usize = 15;
+
+/// A playlist's videos, up to 50, from its page. YouTube reshapes that page
+/// now and then; when none of the shapes Bowerbird knows is in it, the
+/// playlist's feed, which has kept one format for years, gives the first 15.
+pub async fn playlist(list_id: &str) -> Result<Playlist> {
+    let http = crate::http::client()
+        .timeout(TIMEOUT)
+        .build()
+        .map_err(|e| Error::Http(e.to_string()))?;
+    let ids =
+        extract_playlist_video_ids(&playlist_page(&http, list_id).await?, MAX_PLAYLIST_VIDEOS);
+    let (ids, cut_short) = match ids.is_empty() {
+        false => (ids, false),
+        true => {
+            let ids = playlist_feed(&http, list_id).await?;
+            // A feed with room left lists the whole playlist.
+            let full = ids.len() >= FEED_VIDEOS;
+            (ids, full)
+        }
+    };
+    if ids.is_empty() {
+        return Err(Error::Invalid(
+            "Bowerbird found no videos in this playlist. If it has some, YouTube has changed its pages and Bowerbird's reader is out of date: add the videos one by one for now.".into(),
+        ));
+    }
+    Ok(Playlist {
+        videos: ids
+            .into_iter()
+            .map(|id| format!("https://www.youtube.com/watch?v={id}"))
+            .collect(),
+        cut_short,
+    })
+}
+
+const BROWSER_AGENT: &str =
+    "Mozilla/5.0 (compatible; Bowerbird; +https://github.com/jolovicdev/bowerbird)";
+
+async fn playlist_page(http: &reqwest::Client, list_id: &str) -> Result<String> {
+    let url = format!("https://www.youtube.com/playlist?list={list_id}");
+    get(http, &url, BROWSER_AGENT).await
+}
+
+/// The video ids in a playlist's Atom feed: its first 15 videos. A playlist
+/// that is private, or isn't there, has no feed.
+async fn playlist_feed(http: &reqwest::Client, list_id: &str) -> Result<Vec<String>> {
+    let url = format!("https://www.youtube.com/feeds/videos.xml?playlist_id={list_id}");
+    let response = http
+        .get(url)
+        .header(reqwest::header::USER_AGENT, BROWSER_AGENT)
+        .send()
+        .await
+        .map_err(youtube_error)?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(Error::Invalid(
+            "YouTube has no public playlist at this link.".into(),
+        ));
+    }
+    let feed = response
+        .error_for_status()
+        .map_err(youtube_error)?
+        .text()
+        .await
+        .map_err(youtube_error)?;
+    Ok(ids_between(&feed, PLAYLIST_FEED))
+}
+
+/// What stands before and after a video id in a playlist page. The page lists
+/// each video as a "lockup" of the video type; its older layout, which some
+/// visitors still get, used `playlistVideoRenderer`.
+const PLAYLIST_LOCKUP: (&str, &str) = (
+    "\"contentId\":\"",
+    "\",\"contentType\":\"LOCKUP_CONTENT_TYPE_VIDEO\"",
+);
+const PLAYLIST_RENDERER: (&str, &str) = ("\"playlistVideoRenderer\":{\"videoId\":\"", "\"");
+/// The same in a playlist's feed.
+const PLAYLIST_FEED: (&str, &str) = ("<yt:videoId>", "</yt:videoId>");
+
+fn extract_playlist_video_ids(html: &str, limit: usize) -> Vec<String> {
+    let mut ids = ids_between(html, PLAYLIST_LOCKUP);
+    if ids.is_empty() {
+        ids = ids_between(html, PLAYLIST_RENDERER);
+    }
+    ids.truncate(limit);
+    ids
+}
+
+/// Each video id found between `before` and `after`, once, in page order.
+fn ids_between(html: &str, (before, after): (&str, &str)) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for rest in html.split(before).skip(1) {
+        if let Some(id) = rest.get(..11)
+            && rest[11..].starts_with(after)
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            && !ids.iter().any(|known| known == id)
+        {
+            ids.push(id.to_string());
+        }
+    }
+    ids
+}
+
 pub async fn transcript(id: &str) -> Result<Transcript> {
     let http = crate::http::client()
         .timeout(TIMEOUT)
@@ -70,64 +209,77 @@ pub async fn transcript(id: &str) -> Result<Transcript> {
         .map_err(|e| Error::Http(e.to_string()))?;
     let mut refusal = None;
     for app in &CLIENTS {
-        let player: Player = match player(&http, app, id).await {
-            Ok(player) => player,
-            Err(e) => {
+        match transcript_as(&http, app, id).await? {
+            Attempt::Read(transcript) => return Ok(transcript),
+            Attempt::Refused(e) => {
                 refusal.get_or_insert(e);
-                continue;
             }
-        };
-        let status = player.playability_status.unwrap_or_default();
-        if status.status != "OK" {
-            refusal.get_or_insert(Error::Invalid(format!(
-                "YouTube won't show this video to Bowerbird{}. Only public videos can be added.",
-                status
-                    .reason
-                    .map(|r| format!(" (“{r}”)"))
-                    .unwrap_or_default()
-            )));
-            continue;
         }
-        let details = player.video_details.unwrap_or_default();
-        let tracks = player.captions.map(|c| c.list).unwrap_or_default();
-        let Some(track) = choose_track(&tracks) else {
-            return Err(Error::Invalid(
-                "This video has no captions, so there's no text for Bowerbird to read.".into(),
-            ));
-        };
-        let raw = get(&http, &json3_url(&track.base_url)?, app.user_agent).await?;
-        if raw.trim().is_empty() {
-            refusal.get_or_insert(Error::Http(
-                "YouTube didn't send this video's captions. Try again later.".into(),
-            ));
-            continue;
-        }
-        let captions: Json3 = serde_json::from_str(&raw)
-            .map_err(|e| Error::Http(format!("YouTube sent captions Bowerbird can't read: {e}")))?;
-        let chapters = chapters(&details.short_description);
-        return Ok(Transcript {
-            markdown: transcript::markdown(
-                &details.title,
-                &match details.author.trim() {
-                    "" => String::new(),
-                    author => format!("A video by {author} on YouTube."),
-                },
-                &captions
-                    .events
-                    .iter()
-                    .map(|e| {
-                        (
-                            e.t_start_ms / 1000,
-                            e.segs.iter().map(|s| s.utf8.as_str()).collect(),
-                        )
-                    })
-                    .collect::<Vec<_>>(),
-                &chapters,
-            ),
-            title: details.title,
-        });
     }
     Err(refusal.unwrap_or_else(|| Error::Http("Couldn't reach YouTube.".into())))
+}
+
+/// What one of YouTube's apps got for a video.
+enum Attempt {
+    Read(Transcript),
+    /// This app was turned away, which says nothing about the next one.
+    Refused(Error),
+}
+
+/// Reads a video's captions as one app. An error is about the video, such
+/// as one without captions, and would be the same for any app.
+async fn transcript_as(http: &reqwest::Client, app: &AppClient, id: &str) -> Result<Attempt> {
+    let player: Player = match player(http, app, id).await {
+        Ok(player) => player,
+        Err(e) => return Ok(Attempt::Refused(e)),
+    };
+    let status = player.playability_status.unwrap_or_default();
+    if status.status != "OK" {
+        return Ok(Attempt::Refused(Error::Invalid(format!(
+            "YouTube won't show this video to Bowerbird{}. Only public videos can be added.",
+            status
+                .reason
+                .map(|r| format!(" (“{r}”)"))
+                .unwrap_or_default()
+        ))));
+    }
+    let details = player.video_details.unwrap_or_default();
+    let tracks = player.captions.map(|c| c.list).unwrap_or_default();
+    let Some(track) = choose_track(&tracks) else {
+        return Err(Error::Invalid(
+            "This video has no captions, so there's no text for Bowerbird to read. If you have the audio or video file, drop it in to transcribe it locally.".into(),
+        ));
+    };
+    let raw = get(http, &json3_url(&track.base_url)?, app.user_agent).await?;
+    if raw.trim().is_empty() {
+        return Ok(Attempt::Refused(Error::Http(
+            "YouTube didn't send this video's captions. Try again later.".into(),
+        )));
+    }
+    let captions: Json3 = serde_json::from_str(&raw)
+        .map_err(|e| Error::Http(format!("YouTube sent captions Bowerbird can't read: {e}")))?;
+    let chapters = chapters(&details.short_description);
+    Ok(Attempt::Read(Transcript {
+        markdown: transcript::markdown(
+            &details.title,
+            &match details.author.trim() {
+                "" => String::new(),
+                author => format!("A video by {author} on YouTube."),
+            },
+            &captions
+                .events
+                .iter()
+                .map(|e| {
+                    (
+                        e.t_start_ms / 1000,
+                        e.segs.iter().map(|s| s.utf8.as_str()).collect(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            &chapters,
+        ),
+        title: details.title,
+    }))
 }
 
 async fn player(http: &reqwest::Client, app: &AppClient, id: &str) -> Result<Player> {
@@ -480,5 +632,104 @@ mod tests {
         );
         assert!(chapters("1:00 Late start\n2:00 Next").is_empty());
         assert!(chapters("0:00 Only one").is_empty());
+    }
+
+    #[test]
+    fn recognizes_playlist_urls_and_extracts_unique_video_ids() {
+        assert_eq!(
+            playlist_id("https://www.youtube.com/playlist?list=PL1234567890abcd").as_deref(),
+            Some("PL1234567890abcd")
+        );
+        assert_eq!(
+            playlist_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1234567890abcd"),
+            None
+        );
+        // Cut from a playlist page as YouTube served it: two videos, one of
+        // them listed twice, and a lockup that is not a video.
+        let page = r#"{"lockupViewModel":{"contentImage":{"thumbnailViewModel":{"image":{"sources":[{"url":"https://i.ytimg.com/vi/HtSuA80QTyo/hqdefault.jpg"}]}}},"metadata":{"lockupMetadataViewModel":{"title":{"content":"Lecture 1"}}},"contentId":"HtSuA80QTyo","contentType":"LOCKUP_CONTENT_TYPE_VIDEO","rendererContext":{}}},{"lockupViewModel":{"contentId":"Zc54gFhdpLA","contentType":"LOCKUP_CONTENT_TYPE_VIDEO","rendererContext":{}}},{"lockupViewModel":{"contentId":"HtSuA80QTyo","contentType":"LOCKUP_CONTENT_TYPE_VIDEO"}},{"lockupViewModel":{"contentId":"PLUl4u3cNGP61Oq3tWYp6V_F-5jb5L2iHb","contentType":"LOCKUP_CONTENT_TYPE_PLAYLIST"}}"#;
+        assert_eq!(
+            extract_playlist_video_ids(page, 10),
+            ["HtSuA80QTyo", "Zc54gFhdpLA"]
+        );
+        assert_eq!(extract_playlist_video_ids(page, 1), ["HtSuA80QTyo"]);
+        let older = r#"{"playlistVideoRenderer":{"videoId":"abcdefghijk"}},{"playlistVideoRenderer":{"videoId":"abcdefghijk"}},{"playlistVideoRenderer":{"videoId":"1234567890_"}}"#;
+        assert_eq!(
+            extract_playlist_video_ids(older, 10),
+            ["abcdefghijk", "1234567890_"]
+        );
+    }
+
+    #[test]
+    fn a_playlist_feed_gives_its_video_ids_in_order() {
+        // Two entries cut from a feed as YouTube served it.
+        let feed = r#"<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015" xmlns="http://www.w3.org/2005/Atom">
+ <yt:playlistId>PLUl4u3cNGP61Oq3tWYp6V_F-5jb5L2iHb</yt:playlistId>
+ <entry>
+  <id>yt:video:HtSuA80QTyo</id>
+  <yt:videoId>HtSuA80QTyo</yt:videoId>
+  <title>Lecture 1: Algorithmic Thinking, Peak Finding</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=HtSuA80QTyo"/>
+ </entry>
+ <entry>
+  <id>yt:video:Zc54gFhdpLA</id>
+  <yt:videoId>Zc54gFhdpLA</yt:videoId>
+  <title>Lecture 2: Models of Computation, Document Distance</title>
+ </entry>
+</feed>"#;
+        assert_eq!(
+            ids_between(feed, PLAYLIST_FEED),
+            ["HtSuA80QTyo", "Zc54gFhdpLA"]
+        );
+    }
+
+    fn live() -> bool {
+        let on = std::env::var("BOWERBIRD_LIVE").as_deref() == Ok("1");
+        if !on {
+            eprintln!("skipped: set BOWERBIRD_LIVE=1 to call YouTube");
+        }
+        on
+    }
+
+    fn http() -> reqwest::Client {
+        crate::http::client().timeout(TIMEOUT).build().unwrap()
+    }
+
+    /// Calls YouTube, so it runs only with BOWERBIRD_LIVE=1. Each app is
+    /// tried by itself: while one still gets captions, `transcript` hides
+    /// that the other has stopped.
+    #[tokio::test]
+    async fn each_app_still_reads_a_video_s_captions() {
+        if !live() {
+            return;
+        }
+        for app in &CLIENTS {
+            match transcript_as(&http(), app, "dQw4w9WgXcQ").await {
+                Ok(Attempt::Read(transcript)) => assert!(
+                    transcript.markdown.to_lowercase().contains("never gonna"),
+                    "{} got captions without the lyrics",
+                    app.name
+                ),
+                Ok(Attempt::Refused(e)) => panic!("YouTube turned {} away: {e}", app.name),
+                Err(e) => panic!("{} failed: {e}", app.name),
+            }
+        }
+    }
+
+    /// Calls YouTube, so it runs only with BOWERBIRD_LIVE=1. The feed is what
+    /// playlists fall back on, so it is checked while the page still works.
+    #[tokio::test]
+    async fn the_playlist_feed_still_lists_videos() {
+        if !live() {
+            return;
+        }
+        let ids = playlist_feed(&http(), "PLUl4u3cNGP61Oq3tWYp6V_F-5jb5L2iHb")
+            .await
+            .unwrap();
+        assert!(ids.len() >= 10, "{ids:?}");
+        let missing = playlist_feed(&http(), "PLxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx").await;
+        assert_eq!(
+            missing.unwrap_err().to_string(),
+            "YouTube has no public playlist at this link."
+        );
     }
 }

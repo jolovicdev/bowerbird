@@ -1,5 +1,7 @@
 // Client for bowerbird-server. Types mirror the server's JSON.
 
+import { folderOf } from '#lib/drop.ts';
+
 export type Spine = { letter: string; color: number };
 
 export type NotebookSummary = {
@@ -28,12 +30,14 @@ export type Source = {
 	transcribing?: Progress;
 	/** A scanned PDF's OCR, until its text is ready. */
 	reading?: Progress;
+	/** True when this PDF was read (or attempted) with OCR. */
+	scanned?: boolean;
 };
 
 export type Goal = 'default' | 'tutor' | 'custom';
 export type Length = 'shorter' | 'default' | 'longer';
 /** How answers in a notebook are written. */
-export type ChatStyle = { goal: Goal; custom?: string; length: Length };
+export type ChatStyle = { goal: Goal; custom?: string; length: Length; model?: string; thinking?: Thinking };
 
 export type Notebook = {
 	slug: string;
@@ -42,6 +46,8 @@ export type Notebook = {
 	sources: Source[];
 	/** Letters of sources an add request found already in the notebook. */
 	already?: string[];
+	/** Files or playlist items skipped during a batch import. */
+	skipped?: string[];
 	/** Embedding of new passages for search by meaning, until every passage has a vector. */
 	embedding?: Progress;
 };
@@ -169,15 +175,58 @@ export type Provider = { name: string; key_env: string; has_key: boolean; saved:
 
 export type SearchBackend = 'duckduckgo' | 'searxng' | 'brave' | 'tavily' | 'exa';
 export type SearchSettings = { backend: SearchBackend; searxng_url?: string };
+export type Thinking = 'default' | 'off' | 'low' | 'medium' | 'high';
+export type OcrScript =
+	| 'latin'
+	| 'cyrillic'
+	| 'multilingual'
+	| 'korean'
+	| 'arabic'
+	| 'devanagari'
+	| 'greek'
+	| 'thai'
+	| 'tamil'
+	| 'telugu';
+export type ModelProfile = { name: string; model: string; thinking: Thinking };
 
 export type Settings = {
 	chat_model: string;
 	default_model: string;
+	helper_model: string | null;
+	thinking: Thinking;
+	profiles: ModelProfile[];
+	ocr_script: OcrScript;
 	providers: Provider[];
 	search: SearchSettings;
 	/** Search services that take a key. */
 	search_keys: Provider[];
 	model_server: string | null;
+};
+
+export type PassageHit = {
+	label: string;
+	source_id: string;
+	source_title: string;
+	letter: string;
+	ord: number;
+	page_start: number | null;
+	section: string;
+	snippet: string;
+	score: number;
+};
+export type NoteHit = { id: string; title: string; snippet: string };
+export type ChatHit = { chat_id: string; chat_title: string; turn: number; question: string; snippet: string };
+export type NotebookSearch = { query: string; passages: PassageHit[]; notes: NoteHit[]; chats: ChatHit[] };
+export type LibraryNotebookHit = { slug: string; title: string; sources: number };
+export type LibraryPassageHit = PassageHit & { notebook_slug: string; notebook_title: string };
+export type LibraryNoteHit = NoteHit & { notebook_slug: string; notebook_title: string };
+export type LibraryChatHit = ChatHit & { notebook_slug: string; notebook_title: string };
+export type LibrarySearch = {
+	query: string;
+	notebooks: LibraryNotebookHit[];
+	passages: LibraryPassageHit[];
+	notes: LibraryNoteHit[];
+	chats: LibraryChatHit[];
 };
 
 /** A web page found for a research question. */
@@ -318,8 +367,18 @@ export const api = {
 	notebook: (slug: string) => request<Notebook>(nb(slug)),
 	chats: (slug: string) => request<ChatSummary[]>(`${nb(slug)}/chats`),
 	turns: (slug: string, chat: string) => request<Turn[]>(`${nb(slug)}/chats/${encodeURIComponent(chat)}`),
+	exportChat: async (slug: string, chat: string) =>
+		(await fetchApi(`${nb(slug)}/chats/${encodeURIComponent(chat)}/export`)).blob(),
 	deleteChat: (slug: string, chat: string) =>
 		request<void>(`${nb(slug)}/chats/${encodeURIComponent(chat)}`, { method: 'DELETE' }),
+	searchLibrary: (q: string) => request<LibrarySearch>(`/search?q=${encodeURIComponent(q)}`),
+	searchNotebook: (slug: string, q: string, includeExcluded = false) =>
+		request<NotebookSearch>(
+			`${nb(slug)}/search?q=${encodeURIComponent(q)}${includeExcluded ? '&include_excluded=true' : ''}`
+		),
+	exportBibtex: async (slug: string) => (await fetchApi(`${nb(slug)}/bibtex`)).blob(),
+	exportNotebook: async (slug: string) => (await fetchApi(`${nb(slug)}/export`)).blob(),
+	rereadSource: (slug: string, id: string) => post<Notebook>(`${source(slug, id)}/reread`, {}),
 	guide: (slug: string) => request<GuideState>(`${nb(slug)}/guide`),
 	writeGuide: (slug: string) => post<GuideState>(`${nb(slug)}/guide`, {}),
 	notes: (slug: string) => request<NoteSummary[]>(`${nb(slug)}/notes`),
@@ -368,17 +427,26 @@ export const api = {
 	renameSource: (slug: string, id: string, title: string) => send<Notebook>('PATCH', source(slug, id), { title }),
 	removeSource: (slug: string, id: string) => request<Notebook>(source(slug, id), { method: 'DELETE' }),
 	settings: () => request<Settings>('/settings'),
+	models: (provider: string) =>
+		request<{ provider: string; models: string[] }>(`/settings/models?provider=${encodeURIComponent(provider)}`),
 	saveSettings: (update: {
 		chat_model?: string;
+		helper_model?: string;
+		thinking?: Thinking;
+		profiles?: ModelProfile[];
+		ocr_script?: OcrScript;
 		keys?: Record<string, string>;
 		search?: SearchSettings;
 		model_server?: string;
-	}) =>
-		send<Settings>('PUT', '/settings', update),
+	}) => send<Settings>('PUT', '/settings', update),
 	testModel: () => request<{ provider: string }>('/settings/test', { method: 'POST' }),
 	addFiles: (slug: string, files: File[]) => {
 		const form = new FormData();
-		for (const file of files) form.append('file', file, file.name);
+		for (const file of files) {
+			// Names the folder of the file after it, which its title can carry.
+			form.append('folder', folderOf(file));
+			form.append('file', file, file.name);
+		}
 		return request<Notebook>(`${nb(slug)}/sources/file`, { method: 'POST', body: form });
 	},
 	addUrl: (slug: string, url: string) => post<Notebook>(`${nb(slug)}/sources/url`, { url }),
@@ -388,8 +456,8 @@ export const api = {
 
 export type AskHandlers = {
 	passages: (reading: Reading) => void;
-	/** The model started reasoning before it writes. */
-	thinking: () => void;
+	/** Reasoning the model writes before its answer, piece by piece. */
+	thinking: (text: string) => void;
 	text: (text: string) => void;
 	cite: (citation: Citation) => void;
 	done: (turn: Turn) => void;
@@ -438,14 +506,15 @@ export function ask(
 	question: string,
 	deep: boolean,
 	on: AskHandlers,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	override?: { model?: string; thinking?: Thinking }
 ): Promise<void> {
 	return stream(
 		`${nb(slug)}/ask`,
-		{ question, deep, chat },
+		{ question, deep, chat, ...override },
 		(event, payload) => {
 			if (event === 'passages') on.passages(payload);
-			else if (event === 'thinking') on.thinking();
+			else if (event === 'thinking') on.thinking(payload);
 			else if (event === 'text') on.text(payload);
 			else if (event === 'cite') on.cite(payload);
 			else if (event === 'done') on.done(payload);
@@ -457,6 +526,7 @@ export function ask(
 
 export type ReportHandlers = {
 	note: (note: { title: string }) => void;
+	thinking?: (text: string) => void;
 	text: (text: string) => void;
 	cite: (citation: Citation) => void;
 	done: (note: Note) => void;
@@ -474,8 +544,37 @@ export function writeReport(
 ): Promise<void> {
 	return stream(`${nb(slug)}/reports`, { kind, topic, instructions }, (event, payload) => {
 		if (event === 'note') on.note(payload);
+		else if (event === 'thinking') on.thinking?.(payload);
 		else if (event === 'text') on.text(payload);
 		else if (event === 'cite') on.cite(payload);
+		else if (event === 'done') on.done(payload);
+		else if (event === 'error') on.error(payload.error);
+	});
+}
+
+export type StudyStage = { stage: 'passages' | 'thinking' | 'writing'; chars?: number };
+export type StudyStreamHandlers = {
+	stage?: (stage: StudyStage) => void;
+	thinking?: (text: string) => void;
+	done: (set: StudySet) => void;
+	error: (message: string) => void;
+};
+
+/** Streams progress while creating a study set. The server finishes and saves
+ * the set even if this page closes. */
+export function createStudyStream(
+	slug: string,
+	kind: StudyKind,
+	count: number,
+	difficulty: Difficulty,
+	topic: string,
+	describe = '',
+	format: AudioFormat = 'deep-dive',
+	on: StudyStreamHandlers
+): Promise<void> {
+	return stream(`${nb(slug)}/studio/stream`, { kind, count, difficulty, topic, describe, format }, (event, payload) => {
+		if (event === 'stage') on.stage?.(payload);
+		else if (event === 'thinking') on.thinking?.(payload);
 		else if (event === 'done') on.done(payload);
 		else if (event === 'error') on.error(payload.error);
 	});

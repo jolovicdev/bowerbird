@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { UPLOAD_MB, type Found, type Research } from '#lib/api.ts';
+	import { droppedFiles } from '#lib/drop.ts';
 
 	let {
 		onfiles,
@@ -18,15 +19,23 @@
 	import { closeOnBack, popLayer, pushLayer } from '#lib/layers.svelte.ts';
 
 	let dialog: HTMLDialogElement;
+	let folderInput: HTMLInputElement;
 	let url = $state('');
+	let bulkUrls = $state('');
+	let bulkProgress = $state<{ done: number; total: number } | null>(null);
+	let bulkFailures = $state<string[]>([]);
 	let title = $state('');
 	let text = $state('');
 	let over = $state(false);
-	let busy = $state<'url' | 'text' | null>(null);
+	let busy = $state<'url' | 'text' | 'bulk' | null>(null);
 	let urlError = $state<string | null>(null);
 	let textError = $state<string | null>(null);
 
+	/** How many times the dialog has been opened, which tells one showing of it from the next. */
+	let showings = 0;
+
 	export function show() {
+		showings += 1;
 		dialog.showModal();
 		pushLayer('dialog');
 	}
@@ -43,6 +52,8 @@
 
 	function reset() {
 		url = '';
+		bulkUrls = '';
+		bulkFailures = [];
 		title = '';
 		text = '';
 		urlError = null;
@@ -90,10 +101,33 @@
 
 	const host = (link: string) => new URL(link).hostname.replace(/^www\./, '');
 
-	function pick(files: FileList | null | undefined) {
-		if (!files?.length) return;
-		onfiles([...files]);
+	function pick(files: FileList | File[] | null | undefined) {
+		const list = files ? [...files].filter((f) => !f.name.startsWith('.')) : [];
+		if (!list.length) return;
+		onfiles(list);
 		dialog.close();
+	}
+
+	async function addBulkUrls(event: SubmitEvent) {
+		event.preventDefault();
+		const links = [...new Set(bulkUrls.split(/\r?\n/).map((l) => l.trim()).filter(Boolean))];
+		if (!links.length) return;
+		busy = 'bulk';
+		bulkFailures = [];
+		const showing = showings;
+		try {
+			// The batch goes on if the dialog closes, so its place is counted here and not read back from the page.
+			for (const [done, link] of links.entries()) {
+				bulkProgress = { done, total: links.length };
+				const problem = await onurl(link);
+				if (problem) bulkFailures.push(`${link}: ${problem}`);
+			}
+		} finally {
+			bulkProgress = null;
+			busy = null;
+		}
+		// Opened again in the meantime, the dialog is in use for something else and stays.
+		if (!bulkFailures.length && showing === showings) dialog.close();
 	}
 
 	// Links and pasted text stay in the dialog until they're added, so a
@@ -139,23 +173,26 @@
 			over = true;
 		}}
 		ondragleave={() => (over = false)}
-		ondrop={(e) => {
+		ondrop={async (e) => {
 			e.preventDefault();
 			e.stopPropagation();
 			over = false;
-			pick(e.dataTransfer?.files);
+			pick(await droppedFiles(e.dataTransfer));
 		}}
 	>
 		<input
 			class="visually-hidden"
 			type="file"
 			multiple
-			accept=".pdf,.docx,.epub,.md,.markdown,.txt,.mp3,.m4a,.aac,.wav,.ogg,.oga,.opus,.flac,.webm"
+			accept=".pdf,.docx,.epub,.md,.markdown,.txt,.zip,.mp3,.m4a,.aac,.wav,.ogg,.oga,.opus,.flac,.webm,.mp4,.m4v,.mov,.mkv"
 			onchange={(e) => pick(e.currentTarget.files)}
 		/>
-		<span class="drop-main"><span class="link">Choose files</span> or drop them here</span>
-		<span class="hint">PDF, Word, EPUB, Markdown, plain text, or a recording, up to {UPLOAD_MB} MB each</span>
+		<span class="drop-main"><span class="link">Choose files</span> or drop files/folders here</span>
+		<span class="hint">PDF, Word, EPUB, Markdown, plain text, audio/video recordings, or .zip archives, up to {UPLOAD_MB} MB each</span>
 	</label>
+	<p class="folder-row">
+		<button type="button" class="folder-pick" onclick={() => folderInput.click()}>Or choose a folder</button>
+	</p>
 
 	<form class="field" onsubmit={addUrl}>
 		<label for="add-url">Web page, PDF, or YouTube link</label>
@@ -163,7 +200,7 @@
 			<input
 				id="add-url"
 				type="url"
-				placeholder="https://"
+				placeholder="https:// (supports YouTube videos & playlists)"
 				bind:value={url}
 				required
 				aria-invalid={urlError ? 'true' : undefined}
@@ -173,6 +210,18 @@
 		</div>
 		{#if urlError}<p class="problem" id="add-url-error" role="alert">{urlError}</p>{/if}
 	</form>
+
+	<details>
+		<summary>Add multiple links</summary>
+		<form class="field" onsubmit={addBulkUrls}>
+			<label for="bulk-urls">One web page, PDF, or YouTube link per line</label>
+			<textarea id="bulk-urls" rows="4" bind:value={bulkUrls} placeholder="https://example.org/one&#10;https://example.org/two" required></textarea>
+			{#each bulkFailures as problem (problem)}<p class="problem" role="alert">{problem}</p>{/each}
+			<button disabled={!bulkUrls.trim() || busy !== null}>
+				{bulkProgress ? `Adding ${bulkProgress.done + 1} of ${bulkProgress.total}…` : 'Add links'}
+			</button>
+		</form>
+	</details>
 
 	<details>
 		<summary>Paste text</summary>
@@ -243,6 +292,19 @@
 	</details>
 </dialog>
 
+<!-- Kept outside <dialog> so the dialog holds a single file input. -->
+<input
+	class="visually-hidden"
+	type="file"
+	multiple
+	webkitdirectory
+	bind:this={folderInput}
+	onchange={(e) => {
+		pick(e.currentTarget.files);
+		e.currentTarget.value = '';
+	}}
+/>
+
 <style>
 	dialog {
 		width: min(100% - 2rem, 32rem);
@@ -295,12 +357,30 @@
 		flex-direction: column;
 		gap: 0.25rem;
 		align-items: center;
-		margin: 0.75rem 1.5rem 1.25rem;
-		padding: 2rem 1rem;
+		margin: 0.75rem 1.5rem 0.45rem;
+		padding: 1.75rem 1rem;
 		border: 1px dashed var(--edge);
 		border-radius: 4px;
 		text-align: center;
 		cursor: pointer;
+	}
+	.folder-row {
+		margin: 0 1.5rem 1.15rem;
+		text-align: center;
+	}
+	.folder-pick {
+		padding: 0;
+		border: 0;
+		background: none;
+		color: var(--ink-2);
+		font-size: var(--t-xs);
+		font-style: italic;
+		text-decoration: underline;
+		text-underline-offset: 0.2em;
+		cursor: pointer;
+	}
+	.folder-pick:hover {
+		color: var(--rubric);
 	}
 	.drop.over,
 	.drop:hover {

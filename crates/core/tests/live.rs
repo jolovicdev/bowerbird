@@ -3,6 +3,7 @@
 //! only with BOWERBIRD_LIVE=1. Reads DEEPSEEK_API_KEY from the environment,
 //! else from the workspace .env.
 
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use bowerbird_core::ask::{self, DEFAULT_MODEL};
@@ -100,6 +101,52 @@ async fn youtube_captions_still_download() {
         transcript.markdown.to_lowercase().contains("never gonna"),
         "captions came back without the lyrics: {}",
         &transcript.markdown[..transcript.markdown.len().min(300)]
+    );
+}
+
+#[tokio::test]
+async fn youtube_playlists_still_list_their_videos() {
+    if !live() {
+        return;
+    }
+    // MIT 6.006, Fall 2011: 47 lectures when this was written.
+    let playlist = youtube::playlist("PLUl4u3cNGP61Oq3tWYp6V_F-5jb5L2iHb")
+        .await
+        .unwrap();
+    // The feed standing in means the page no longer has a shape Bowerbird
+    // reads: playlists still work, but only their first videos.
+    assert!(!playlist.cut_short, "the playlist page has changed shape");
+    // A lecture may be taken down one day; most of them staying is enough.
+    assert!(playlist.videos.len() >= 20, "{:?}", playlist.videos);
+    assert!(
+        playlist
+            .videos
+            .iter()
+            .all(|v| v.starts_with("https://www.youtube.com/watch?v=")),
+        "{:?}",
+        playlist.videos
+    );
+}
+
+#[tokio::test]
+async fn openrouter_lists_its_models_without_a_key() {
+    if !live() {
+        return;
+    }
+    let settings = Settings::default();
+    if settings.key("OPEN_ROUTER_API_KEY").is_some() {
+        eprintln!("skipped: an OpenRouter key is set, so the list would be asked for with it");
+        return;
+    }
+    let (provider, models) = ask::list_models(Arc::new(RwLock::new(settings)), "OpenRouter")
+        .await
+        .unwrap();
+    assert_eq!(provider, "OpenRouter");
+    assert!(models.len() > 50, "{} models", models.len());
+    assert!(
+        models.iter().all(|m| m.starts_with("open_router::")),
+        "{:?}",
+        &models[..3]
     );
 }
 

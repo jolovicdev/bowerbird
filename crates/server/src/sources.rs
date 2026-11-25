@@ -1,5 +1,6 @@
 //! Sources: adding files, links and text, switching them on and off, and reading them back.
 
+use std::collections::HashSet;
 use std::sync::PoisonError;
 
 use axum::Json;
@@ -9,11 +10,11 @@ use axum::response::{IntoResponse, Response};
 use bowerbird_core::ask::Citation;
 use bowerbird_core::index::Index;
 use bowerbird_core::notebook::{self, Notebook, SourceKind};
-use bowerbird_core::web;
+use bowerbird_core::{web, youtube};
 use serde::{Deserialize, Serialize};
 
 use crate::notebooks::{NotebookView, add_noting_duplicate, notebook_view};
-use crate::speech::start_transcriptions;
+use crate::speech::{Progress, start_transcriptions};
 use crate::{ApiError, ApiResult, AppState, Body, blocking, detached, notebook_dir, too_large};
 
 #[derive(Deserialize)]
@@ -58,6 +59,56 @@ pub(crate) async fn remove_source(
     .await
 }
 
+/// Re-reads a scanned PDF using the currently selected OCR script in Settings.
+pub(crate) async fn reread_source(
+    State(state): State<AppState>,
+    UrlPath((slug, id)): UrlPath<(String, String)>,
+) -> ApiResult<Json<NotebookView>> {
+    blocking(move || {
+        let dir = notebook_dir(&state.library, &slug)?;
+        let lock = state.lock_for(&slug);
+        let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let nb = Notebook::open(&dir)?;
+        let Some(source) = nb.source(&id) else {
+            return Err(ApiError(
+                StatusCode::NOT_FOUND,
+                "No source with that id.".into(),
+            ));
+        };
+        if source.kind != SourceKind::Pdf {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "Only scanned PDFs can be re-read with OCR.".into(),
+            ));
+        }
+        // A read under way would finish after the new one starts and put its
+        // text, in the script it began with, in place of the new one's.
+        let key = format!("{slug}/sources/{id}");
+        if state
+            .job(&key)
+            .is_some_and(|job| !matches!(job, Progress::Failed { .. }))
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "This scan is still being read. Read it again once that is done.".into(),
+            ));
+        }
+        for path in [nb.ocr_path(source), nb.ocr_failure_path(source)] {
+            match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(bowerbird_core::Error::from(e).into());
+                }
+                _ => {}
+            }
+        }
+        let mut index = Index::open(&nb.index_path())?;
+        index.remove(&source.id)?;
+        state.finish_job(&key);
+        notebook_view(&state, slug).map(Json)
+    })
+    .await
+}
+
 pub(crate) async fn add_files(
     State(state): State<AppState>,
     UrlPath(slug): UrlPath<String>,
@@ -73,27 +124,52 @@ pub(crate) async fn add_files(
             format!("The upload broke off: {e}"),
         )
     };
+    // A `folder` field names the folder the files after it were dropped in.
+    let mut folder = String::new();
     let mut files = Vec::new();
     while let Some(field) = form.next_field().await.map_err(bad_upload)? {
+        if field.name() == Some("folder") {
+            folder = field.text().await.map_err(bad_upload)?;
+            continue;
+        }
         let name = field.file_name().unwrap_or("Untitled").to_string();
-        files.push((name, field.bytes().await.map_err(bad_upload)?));
+        let bytes = field.bytes().await.map_err(bad_upload)?;
+        files.push((folder.clone(), name, bytes));
     }
+    let is_zip = |name: &str| {
+        std::path::Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+    };
     detached(async move {
         let view = blocking({
             let state = state.clone();
             move || {
-                for (name, bytes) in &files {
-                    notebook::check_file(name, bytes)?;
+                for (_, name, bytes) in &files {
+                    if !is_zip(name) {
+                        notebook::check_file(name, bytes)?;
+                    }
                 }
                 let lock = state.lock_for(&slug);
                 let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 let mut nb = Notebook::open(&dir)?;
                 let mut already = Vec::new();
-                for (name, bytes) in &files {
-                    add_noting_duplicate(&mut nb, &mut already, |nb| nb.add_named(name, bytes))?;
+                let mut skipped = Vec::new();
+                for (folder, name, bytes) in &files {
+                    if is_zip(name) {
+                        let report = nb.add_zip(bytes)?;
+                        already.extend(report.already);
+                        skipped.extend(report.skipped);
+                    } else {
+                        add_noting_duplicate(&mut nb, &mut already, |nb| {
+                            nb.add_named_in(folder, name, bytes)
+                        })?;
+                    }
                 }
                 Ok(NotebookView {
                     already,
+                    skipped,
                     ..notebook_view(&state, slug)?
                 })
             }
@@ -122,6 +198,71 @@ pub(crate) async fn add_url(
             StatusCode::BAD_REQUEST,
             "Links need to start with http:// or https://.".into(),
         ));
+    }
+    if let Some(list_id) = youtube::playlist_id(&url) {
+        let known: HashSet<String> = Notebook::open(&dir)?
+            .sources
+            .into_iter()
+            .filter_map(|source| source.url)
+            .collect();
+        return detached(async move {
+            let playlist = youtube::playlist(&list_id).await?;
+            let mut skipped = Vec::new();
+            if playlist.cut_short {
+                skipped.push(format!(
+                    "the videos after the first {} (YouTube's playlist page couldn't be read)",
+                    playlist.videos.len()
+                ));
+            }
+            // Only the videos the notebook lacks are fetched, so adding a
+            // playlist again costs one request, not one for each video.
+            let (present, missing): (Vec<String>, Vec<String>) = playlist
+                .videos
+                .into_iter()
+                .partition(|video| known.contains(video));
+            let mut fetched = Vec::new();
+            for video_url in missing {
+                match web::fetch(&video_url, state.reach).await {
+                    Ok(page) => fetched.push((video_url, page)),
+                    Err(e) => skipped.push(format!("{video_url} ({e})")),
+                }
+            }
+            if fetched.is_empty() && present.is_empty() {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    skipped
+                        .into_iter()
+                        .next()
+                        .unwrap_or_else(|| "No videos in this playlist could be added.".into()),
+                ));
+            }
+            blocking(move || {
+                let lock = state.lock_for(&slug);
+                let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                let mut nb = Notebook::open(&dir)?;
+                let mut already: Vec<String> = present
+                    .iter()
+                    .filter_map(|video| nb.source_with_url(video))
+                    .map(|source| source.letter.clone())
+                    .collect();
+                for (video_url, page) in &fetched {
+                    if let Some(existing) = nb.source_with_url(video_url) {
+                        already.push(existing.letter.clone());
+                    } else if let Err(e) = add_noting_duplicate(&mut nb, &mut already, |nb| {
+                        nb.add_web_page(video_url, page)
+                    }) {
+                        skipped.push(format!("{video_url} ({})", e.1));
+                    }
+                }
+                Ok(Json(NotebookView {
+                    already,
+                    skipped,
+                    ..notebook_view(&state, slug)?
+                }))
+            })
+            .await
+        })
+        .await;
     }
     let known = Notebook::open(&dir)?.source_with_url(&url).is_some();
     detached(async move {
@@ -401,6 +542,9 @@ pub(crate) async fn source_file(
                 "wav" => "audio/wav",
                 "flac" => "audio/flac",
                 "webm" => "audio/webm",
+                "mp4" | "m4v" => "video/mp4",
+                "mov" => "video/quicktime",
+                "mkv" => "video/x-matroska",
                 _ => "audio/ogg",
             },
         };
@@ -465,6 +609,30 @@ mod tests {
 
     use super::*;
     use crate::tests::test_state;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_scan_still_being_read_is_not_read_again() {
+        let (state, library) = test_state("reread-busy");
+        let mut nb = Notebook::open_or_create(&library.join("scans"), "Scans").unwrap();
+        let source = nb.add_text("In place of a scan", "Some text.").unwrap();
+        nb.sources[0].kind = SourceKind::Pdf;
+        nb.save().unwrap();
+        std::fs::write(nb.ocr_path(&source), "Text read so far.").unwrap();
+        let key = format!("scans/sources/{}", source.id);
+        assert!(state.claim_job(&key));
+
+        let refused = reread_source(
+            State(state.clone()),
+            UrlPath(("scans".to_string(), source.id.clone())),
+        )
+        .await;
+        assert_eq!(refused.err().map(|e| e.0), Some(StatusCode::CONFLICT));
+        assert!(nb.ocr_path(&source).exists(), "the text in hand is kept");
+        assert!(
+            state.job(&key).is_some(),
+            "the read under way keeps its place"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_source_removed_while_its_link_is_added_again_is_reported() {

@@ -415,7 +415,7 @@ test('keeps the pictures of a web page and shows them beside their captions', as
 		await page.getByRole('button', { name: 'New notebook' }).click();
 		await page.getByLabel('Notebook name').fill(`Bowers ${Date.now()}`);
 		await page.getByRole('button', { name: 'Create' }).click();
-		await page.getByLabel('Web page, PDF, or YouTube link').fill(`http://127.0.0.2:${port}/bowers.html`);
+		await page.getByLabel('Web page, PDF, or YouTube link', { exact: true }).fill(`http://127.0.0.2:${port}/bowers.html`);
 		await page.getByRole('button', { name: 'Add link' }).click();
 		const source = page.getByRole('complementary', { name: 'Contents' }).getByRole('button', { name: /^Bowers of the Vogelkop, source/ });
 		await expect(source).toBeVisible({ timeout: 60_000 });

@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { droppedFiles } from '#lib/drop.ts';
+
 	let {
 		title,
 		enabled,
@@ -24,11 +26,11 @@
 	ondragleave={(e) => {
 		if (e.relatedTarget === null) dropping = false;
 	}}
-	ondrop={(e) => {
+	ondrop={async (e) => {
 		if (!carriesFiles(e) || !enabled) return;
 		e.preventDefault();
 		dropping = false;
-		const files = [...(e.dataTransfer?.files ?? [])];
+		const files = await droppedFiles(e.dataTransfer);
 		if (files.length) onfiles(files);
 	}}
 />

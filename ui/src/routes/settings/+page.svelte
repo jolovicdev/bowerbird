@@ -1,18 +1,35 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import { api, describe, type Provider, type SearchBackend, type Settings } from '#lib/api.ts';
+	import {
+		api,
+		describe,
+		type ModelProfile,
+		type Provider,
+		type SearchBackend,
+		type Settings,
+		type Thinking
+	} from '#lib/api.ts';
 	import Choice from '#lib/components/Choice.svelte';
+	import ModelBrowser from '#lib/components/ModelBrowser.svelte';
+	import ModelProfiles from '#lib/components/ModelProfiles.svelte';
+	import OcrScriptForm from '#lib/components/OcrScriptForm.svelte';
 
 	let settings = $state<Settings | null>(null);
 	let error = $state<string | null>(null);
 
 	let model = $state('');
+	let helperModel = $state('');
+	let thinking = $state<Thinking>('default');
 	let modelSaved = $state(false);
 	let modelError = $state<string | null>(null);
 
 	let testing = $state(false);
 	let tested = $state<string | null>(null);
 	let testError = $state<string | null>(null);
+
+	/** The field the model list is open for. */
+	let browsingFor = $state<'chat' | 'helper' | null>(null);
+	let browseProvider = $state('');
 
 	let server = $state('');
 	let serverSaved = $state(false);
@@ -31,6 +48,8 @@
 		try {
 			settings = await api.settings();
 			model = settings.chat_model;
+			helperModel = settings.helper_model ?? '';
+			thinking = settings.thinking;
 			server = settings.model_server ?? '';
 			backend = settings.search.backend;
 			searxng = settings.search.searxng_url ?? '';
@@ -39,6 +58,21 @@
 		}
 	});
 
+	const modelChanged = $derived(
+		settings !== null &&
+			(model.trim() !== settings.chat_model ||
+				helperModel.trim() !== (settings.helper_model ?? '') ||
+				thinking !== settings.thinking)
+	);
+
+	const THINKING_ABOUT: Record<Thinking, string> = {
+		default: "Leaves thinking up to the model. If a reasoning model thinks too long before answering, try Low or Off.",
+		off: 'Asks the model to answer without a thinking step. Some models ignore or refuse this.',
+		low: 'Keeps thinking short before the answer starts.',
+		medium: 'Balanced thinking before the answer.',
+		high: 'Allows longer thinking for harder questions. With a cloud model, Bowerbird stops waiting after 3 minutes of thinking with no answer.'
+	};
+
 	// Providers with a key first, so the ones in use are at hand.
 	const providers = $derived(
 		[...(settings?.providers ?? [])].sort((a, b) => Number(b.has_key) - Number(a.has_key) || a.name.localeCompare(b.name))
@@ -46,14 +80,46 @@
 
 	const status = (p: Provider) => (p.saved ? 'Key saved' : p.has_key ? 'Key from the environment' : 'No key');
 
+	function openBrowser(target: 'chat' | 'helper') {
+		browsingFor = browsingFor === target ? null : target;
+	}
+
+	function pickModel(id: string) {
+		if (browsingFor === 'helper') helperModel = id;
+		else model = id;
+		modelSaved = false;
+		forgetTest();
+		browsingFor = null;
+	}
+
 	async function saveModel(event: SubmitEvent) {
 		event.preventDefault();
 		modelSaved = false;
 		modelError = null;
 		forgetTest();
 		try {
-			settings = await api.saveSettings({ chat_model: model.trim() });
+			settings = await api.saveSettings({
+				chat_model: model.trim(),
+				helper_model: helperModel.trim(),
+				thinking
+			});
 			model = settings.chat_model;
+			helperModel = settings.helper_model ?? '';
+			thinking = settings.thinking;
+			modelSaved = true;
+		} catch (e) {
+			modelError = describe(e);
+		}
+	}
+
+	async function useProfile(profile: ModelProfile) {
+		modelSaved = false;
+		modelError = null;
+		forgetTest();
+		try {
+			settings = await api.saveSettings({ chat_model: profile.model, thinking: profile.thinking });
+			model = settings.chat_model;
+			thinking = settings.thinking;
 			modelSaved = true;
 		} catch (e) {
 			modelError = describe(e);
@@ -213,28 +279,91 @@
 							forgetTest();
 						}}
 					/>
-					<button class="primary" disabled={model.trim() === settings.chat_model}>Save</button>
+					<button type="button" class="action" onclick={() => openBrowser('chat')}>
+						{browsingFor === 'chat' ? 'Close list' : 'Browse models'}
+					</button>
+					<button class="primary" disabled={!modelChanged}>Save</button>
 				</div>
 				<p class="hint" id="model-hint">
 					Use the name the provider gives the model. Bowerbird picks the provider from the name; to choose one
 					yourself, put it in front, as in <code>groq::model-name</code>. Leave it empty for {settings.default_model}.
 				</p>
-				{#if modelSaved}<p class="hint" role="status">Saved. New questions use {settings.chat_model}.</p>{/if}
+
+				<div class="sub-field">
+					<label for="helper-model">Helper model (optional)</label>
+					<div class="inline">
+						<input
+							id="helper-model"
+							bind:value={helperModel}
+							placeholder="Same as model for answers"
+							autocapitalize="none"
+							autocorrect="off"
+							spellcheck="false"
+							oninput={() => {
+								modelSaved = false;
+								forgetTest();
+							}}
+						/>
+						<button type="button" class="action" onclick={() => openBrowser('helper')}>
+							{browsingFor === 'helper' ? 'Close list' : 'Browse'}
+						</button>
+					</div>
+					<p class="hint">
+						A fast, lightweight model for translating search queries, Deep search outlines, and web research queries.
+					</p>
+				</div>
+
+				{#if browsingFor}
+					<!-- Opening the list for the other field starts it afresh. -->
+					{#key browsingFor}
+						<ModelBrowser {providers} server={settings.model_server} bind:provider={browseProvider} onpick={pickModel} />
+					{/key}
+				{/if}
+
+				<div class="thinking-choice">
+					<Choice
+						legend="Thinking"
+						name="thinking"
+						options={[
+							{ value: 'default', label: 'Default' },
+							{ value: 'off', label: 'Off' },
+							{ value: 'low', label: 'Low' },
+							{ value: 'medium', label: 'Medium' },
+							{ value: 'high', label: 'High' }
+						]}
+						bind:value={thinking}
+					/>
+					<p class="hint">{THINKING_ABOUT[thinking]}</p>
+				</div>
+				{#if modelSaved && !modelChanged}<p class="hint" role="status">Saved. New questions use {settings.chat_model}.</p>{/if}
 				{#if modelError}<p class="problem" role="alert">{modelError}</p>{/if}
 				<p class="test">
 					<button
 						type="button"
 						class="action"
-						disabled={testing || model.trim() !== settings.chat_model}
+						disabled={testing || modelChanged}
 						onclick={testModel}
 					>
 						{testing ? 'Testing…' : 'Test model and key'}
 					</button>
 					<span class="hint">Sends one short message, which can cost a tiny amount.</span>
 				</p>
-				{#if tested}<p class="hint" role="status">{tested}</p>{/if}
-				{#if testError}<p class="problem" role="alert">{testError}</p>{/if}
+				{#if tested && !modelChanged}<p class="hint" role="status">{tested}</p>{/if}
+				{#if testError && !modelChanged}<p class="problem" role="alert">{testError}</p>{/if}
 			</form>
+
+			<ModelProfiles {settings} {model} {thinking} onsaved={(next) => (settings = next)} onuse={useProfile} />
+		</section>
+
+		<section aria-labelledby="ocr-heading">
+			<h2 id="ocr-heading">Scanned PDFs (OCR)</h2>
+			<OcrScriptForm
+				{settings}
+				onsaved={(next) => {
+					settings = next;
+					forgetTest();
+				}}
+			/>
 		</section>
 
 		<section aria-labelledby="server-heading">
@@ -455,6 +584,9 @@
 		color: var(--ink-2);
 		cursor: default;
 	}
+	.thinking-choice {
+		margin-top: 1rem;
+	}
 	.test {
 		display: flex;
 		flex-wrap: wrap;
@@ -467,5 +599,8 @@
 	}
 	.key {
 		margin-top: 0.6rem;
+	}
+	.sub-field {
+		margin-top: 1rem;
 	}
 </style>

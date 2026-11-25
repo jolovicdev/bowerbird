@@ -48,8 +48,10 @@ pub(crate) async fn research(
         blocking(move || open_notebook(&state, &slug)).await?
     };
     let settings = state.settings().clone();
-    let client = ask::client(state.settings.clone())?;
-    let queries = search::queries(&client, settings.chat_model(), &question).await?;
+    let (model, thinking) = settings.for_notebook(&nb.chat);
+    let client = ask::client_with_thinking(state.settings.clone(), thinking)?;
+    let (client, model) = ask::helper(&state.settings, &client, &model)?;
+    let queries = search::queries(&client, &model, &question).await?;
     let outcomes =
         futures::future::join_all(queries.iter().map(|q| search::search(&settings, q))).await;
     let mut lists = Vec::new();

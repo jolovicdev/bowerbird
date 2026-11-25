@@ -6,17 +6,75 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::notebook::ChatStyle;
+use crate::ocr::OcrScript;
 use crate::search::SearchSettings;
 use crate::{Error, Result};
 
 /// Overrides where settings live, e.g. for tests.
 pub const CONFIG_ENV: &str = "BOWERBIRD_CONFIG";
 
+/// How much reasoning to ask a thinking model for. `Default` sends nothing,
+/// leaving the model's own default alone and staying compatible with models
+/// that reject reasoning options.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Thinking {
+    #[default]
+    Default,
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl Thinking {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Thinking::Default)
+    }
+
+    pub fn into_effort(self) -> Option<genai::chat::ReasoningEffort> {
+        use genai::chat::ReasoningEffort;
+        match self {
+            Thinking::Default => None,
+            Thinking::Off => Some(ReasoningEffort::Zero),
+            Thinking::Low => Some(ReasoningEffort::Low),
+            Thinking::Medium => Some(ReasoningEffort::Medium),
+            Thinking::High => Some(ReasoningEffort::High),
+        }
+    }
+}
+
+/// A named model + thinking preset that can be switched in one click.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelProfile {
+    pub name: String,
+    pub model: String,
+    /// Always written, so a reader can tell a profile that asks for the
+    /// model's own default from one that says nothing about thinking.
+    #[serde(default)]
+    pub thinking: Thinking,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
     /// Model for answers. Unset means `ask::DEFAULT_MODEL`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_model: Option<String>,
+    /// Faster model used for lightweight tasks (translating search queries,
+    /// picking Deep search sections, writing web research queries). Unset uses
+    /// the model that writes the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub helper_model: Option<String>,
+    /// How much reasoning to ask a thinking model for.
+    #[serde(default, skip_serializing_if = "Thinking::is_default")]
+    pub thinking: Thinking,
+    /// Named model presets for quick switching in Settings and notebooks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<ModelProfile>,
+    /// Script recognizer used when reading scanned PDFs with OCR.
+    #[serde(default, skip_serializing_if = "OcrScript::is_default")]
+    pub ocr_script: OcrScript,
     /// API keys by the environment variable each provider reads, e.g.
     /// `DEEPSEEK_API_KEY`, so saved keys and environment keys line up.
     #[serde(default)]
@@ -121,16 +179,31 @@ impl Settings {
             .unwrap_or(crate::ask::DEFAULT_MODEL)
     }
 
+    /// The model and thinking level for work in a notebook: the notebook's
+    /// own where its answer style names them, else these settings'.
+    pub fn for_notebook(&self, style: &ChatStyle) -> (String, Thinking) {
+        (
+            style
+                .model
+                .clone()
+                .unwrap_or_else(|| self.chat_model().to_string()),
+            style.thinking.unwrap_or(self.thinking),
+        )
+    }
+
     /// The saved key for a provider, else its environment variable.
+    /// OpenRouter also falls back to the common `OPENROUTER_API_KEY` name.
     pub fn key(&self, env_name: &str) -> Option<String> {
+        let env_value = |name: &str| std::env::var(name).ok().filter(|k| !k.trim().is_empty());
         self.keys
             .get(env_name)
             .filter(|k| !k.trim().is_empty())
             .cloned()
+            .or_else(|| env_value(env_name))
             .or_else(|| {
-                std::env::var(env_name)
-                    .ok()
-                    .filter(|k| !k.trim().is_empty())
+                (env_name == "OPEN_ROUTER_API_KEY")
+                    .then(|| env_value("OPENROUTER_API_KEY"))
+                    .flatten()
             })
     }
 }
@@ -146,11 +219,19 @@ mod tests {
             .join("settings.toml");
         let settings = Settings {
             chat_model: Some("claude-sonnet-5-5".into()),
+            thinking: Thinking::Low,
             keys: BTreeMap::from([("ANTHROPIC_API_KEY".into(), "sk-test".into())]),
             ..Default::default()
         };
         settings.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path).unwrap(), settings);
+        let default_path = path.with_file_name("default.toml");
+        Settings::default().save_to(&default_path).unwrap();
+        assert!(
+            !std::fs::read_to_string(&default_path)
+                .unwrap()
+                .contains("thinking")
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -86,11 +86,11 @@ mod tests {
     #[test]
     fn each_kind_asks_for_its_format_and_keeps_the_citation_rules() {
         let guide = system(Kind::StudyGuide, "").unwrap();
-        assert!(guide.contains("## Key terms") && guide.contains("[[A3|exact words]]"));
+        assert!(guide.contains("## Key terms") && guide.contains(CITE_RULES));
         let timeline = system(Kind::Timeline, "ignored").unwrap();
         assert!(timeline.contains("chronological") && !timeline.contains("ignored"));
         let custom = system(Kind::Custom, "A summary for a museum visitor.").unwrap();
-        assert!(custom.contains("museum visitor") && custom.contains("[[A3|exact words]]"));
+        assert!(custom.contains("museum visitor") && custom.contains(CITE_RULES));
         assert!(system(Kind::Custom, "  ").is_err());
         assert_eq!(
             title(Kind::Faq, "", "Thirty Years War"),

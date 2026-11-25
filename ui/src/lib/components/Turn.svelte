@@ -15,7 +15,7 @@
 		error = null,
 		stopped = false,
 		reading = null,
-		thinking = false,
+		thinking = '',
 		since = 0,
 		onopen,
 		onretry,
@@ -38,8 +38,8 @@
 		stopped?: boolean;
 		/** Passages the live answer is written from, once the server says. */
 		reading?: Reading | null;
-		/** The model is reasoning, which it does before it writes. */
-		thinking?: boolean;
+		/** Reasoning the live answer's model has written so far. */
+		thinking?: string;
 		/** When the live question was sent, in milliseconds since the epoch. */
 		since?: number;
 		onopen: (citations: Citation[], el: HTMLElement) => void;
@@ -70,6 +70,23 @@
 		return () => clearInterval(timer);
 	});
 	const elapsed = $derived(Math.max(0, Math.round((now - since) / 1000)));
+
+	let showThinking = $state(false);
+	let thinkingBox = $state<HTMLElement>();
+	let followThinking = true;
+	const hasThinkingText = $derived(thinking.trim().length > 0);
+	// The newest reasoning stays in view unless the reader scrolled up to read.
+	$effect(() => {
+		if (!thinking) {
+			followThinking = true;
+			return;
+		}
+		if (thinkingBox && followThinking) thinkingBox.scrollTop = thinkingBox.scrollHeight;
+	});
+	function scrolledThinking() {
+		if (!thinkingBox) return;
+		followThinking = thinkingBox.scrollHeight - thinkingBox.scrollTop - thinkingBox.clientHeight < 24;
+	}
 
 	const list = (letters: string[]) =>
 		letters.length < 3 ? letters.join(' and ') : `${letters.slice(0, -1).join(', ')} and ${letters.at(-1)}`;
@@ -139,7 +156,32 @@
 			{:else}
 				Finding passages, {elapsed} s
 			{/if}
+			{#if hasThinkingText}
+				<button
+					class="action"
+					aria-expanded={showThinking}
+					aria-controls="thinking-{number}"
+					onclick={() => (showThinking = !showThinking)}
+				>
+					{showThinking ? 'Hide thinking' : 'Show thinking'}
+				</button>
+			{/if}
 		</p>
+		{#if hasThinkingText && showThinking}
+			<!-- Scrolls, so it takes keyboard focus; no live region, since it changes with every word. -->
+			<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+			<div
+				class="thinking"
+				id="thinking-{number}"
+				tabindex="0"
+				role="region"
+				aria-label="The model's thinking"
+				bind:this={thinkingBox}
+				onscroll={scrolledThinking}
+			>
+				{thinking}
+			</div>
+		{/if}
 	{:else}
 		<p class="meta tail" bind:this={tail}>
 			{turn.model}{#if turn.deep}, Deep search{/if}, {seconds(turn.timings.total_ms)} s.
@@ -296,6 +338,19 @@
 		display: flex;
 		gap: 0.5rem;
 		align-items: center;
+	}
+	.thinking {
+		max-height: 12rem;
+		margin: 0.5rem 0 0;
+		padding: 0.1rem 0 0.1rem 0.85rem;
+		overflow-y: auto;
+		border-left: 2px solid var(--line);
+		color: var(--ink-2);
+		font-size: var(--t-xs);
+		font-style: italic;
+		line-height: 1.55;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
 	}
 	.dot {
 		width: 5px;

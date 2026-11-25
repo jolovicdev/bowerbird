@@ -1,7 +1,7 @@
 # Daily check of the services Bowerbird talks to: the default model, YouTube's
-# caption clients, web page extraction, DuckDuckGo, and the downloads of the
-# search and OCR models, plus the end-to-end tests, which ask the model real
-# questions. Needs the DEEPSEEK_API_KEY secret.
+# caption clients and playlists, web page extraction, DuckDuckGo, and the
+# downloads of the search and OCR models, plus the end-to-end tests, which ask
+# the model real questions. Needs the DEEPSEEK_API_KEY secret.
 name: Live
 
 on:
@@ -31,6 +31,13 @@ jobs:
           BOWERBIRD_LIVE: "1"
       - name: Model downloads, OCR and search by meaning
         run: cargo test -p bowerbird-core --lib --locked -- "ocr::" "embed::" "retrieve::"
+        env:
+          BOWERBIRD_LIVE: "1"
+      # Each way of reading YouTube and DuckDuckGo by itself. A feature that
+      # has a second way keeps working when the first one breaks, and only
+      # these say that it broke.
+      - name: Each reader of YouTube and DuckDuckGo
+        run: cargo test -p bowerbird-core --lib --locked -- "youtube::" "search::"
         env:
           BOWERBIRD_LIVE: "1"
 

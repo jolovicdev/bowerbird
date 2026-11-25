@@ -4,12 +4,13 @@ use std::process::ExitCode;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use bowerbird_core::ask::{self, DEFAULT_MODEL, Event};
+use bowerbird_core::ask::{self, Event};
 use bowerbird_core::embed::{self, Embedder};
 use bowerbird_core::index::Index;
 use bowerbird_core::notebook::{self, Notebook};
 use bowerbird_core::retrieve;
-use bowerbird_core::settings::Settings;
+use bowerbird_core::settings::{Settings, Thinking};
+use bowerbird_core::youtube;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -25,7 +26,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Add PDF, Word (.docx), EPUB, Markdown, or text files, or web page URLs. "-" reads pasted text from stdin.
+    /// Add files, folders, .zip archives, or web/YouTube URLs. "-" reads pasted text from stdin.
     Add {
         notebook: String,
         #[arg(required = true)]
@@ -38,8 +39,12 @@ enum Command {
     Ask {
         notebook: String,
         question: String,
-        #[arg(long, default_value = DEFAULT_MODEL)]
-        model: String,
+        /// Override the model from Settings / notebook.
+        #[arg(long)]
+        model: Option<String>,
+        /// Override thinking effort (default, off, low, medium, high).
+        #[arg(long)]
+        thinking: Option<String>,
         /// Let the model pick sections from each source's outline first. Costs one extra model call.
         #[arg(long)]
         deep: bool,
@@ -66,8 +71,18 @@ async fn main() -> ExitCode {
             notebook,
             question,
             model,
+            thinking,
             deep,
-        } => run_ask(&notebook, &question, &model, deep).await,
+        } => {
+            run_ask(
+                &notebook,
+                &question,
+                model.as_deref(),
+                thinking.as_deref(),
+                deep,
+            )
+            .await
+        }
         Command::Search {
             notebook,
             query,
@@ -101,19 +116,107 @@ fn open_existing(name: &str) -> Result<Notebook, Box<dyn std::error::Error>> {
     Ok(Notebook::open(&dir)?)
 }
 
+fn collect_folder_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<std::io::Result<_>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            collect_folder_files(&path, out)?;
+        } else if kind.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Adds `file`, found somewhere under the folder `root`, with the folders
+/// from `root` down to it as the folder its title can carry.
+fn add_from_folder(
+    nb: &mut Notebook,
+    root: &Path,
+    file: &Path,
+) -> bowerbird_core::Result<notebook::Source> {
+    let inside = file.strip_prefix(root).unwrap_or(file);
+    let folders: Vec<_> = root
+        .file_name()
+        .into_iter()
+        .chain(inside.parent().into_iter().flat_map(Path::iter))
+        .map(|part| part.to_string_lossy())
+        .collect();
+    let name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Untitled");
+    nb.add_named_in(&folders.join("/"), name, &std::fs::read(file)?)
+}
+
 async fn add(name: &str, items: &[String], title: Option<&str>) -> CliResult {
     let mut nb = Notebook::open_or_create(&notebook_dir(name), name)?;
     for item in items {
-        let source = if item == "-" {
+        if item == "-" {
             let mut text = String::new();
             std::io::stdin().read_to_string(&mut text)?;
-            nb.add_text(title.unwrap_or("Pasted text"), &text)?
+            let source = nb.add_text(title.unwrap_or("Pasted text"), &text)?;
+            println!("{}  {}", source.letter, source.title);
+        } else if let Some(list) = youtube::playlist_id(item) {
+            let playlist = youtube::playlist(&list).await?;
+            if playlist.cut_short {
+                eprintln!(
+                    "YouTube's playlist page couldn't be read, so only its first {} videos are added.",
+                    playlist.videos.len()
+                );
+            }
+            for video in playlist.videos {
+                match nb.add_url(&video).await {
+                    Ok(source) => println!("{}  {}", source.letter, source.title),
+                    Err(e) => eprintln!("Skipped {video}: {e}"),
+                }
+            }
         } else if item.starts_with("http://") || item.starts_with("https://") {
-            nb.add_url(item).await?
+            let source = nb.add_url(item).await?;
+            println!("{}  {}", source.letter, source.title);
         } else {
-            nb.add_file(Path::new(item))?
-        };
-        println!("{}  {}", source.letter, source.title);
+            let path = Path::new(item);
+            if path.is_dir() {
+                let mut files = Vec::new();
+                collect_folder_files(path, &mut files)?;
+                for file in files {
+                    match add_from_folder(&mut nb, path, &file) {
+                        Ok(source) => println!("{}  {}", source.letter, source.title),
+                        Err(e) => eprintln!("Skipped {}: {e}", file.display()),
+                    }
+                }
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+            {
+                let bytes = std::fs::read(path)?;
+                let report = nb.add_zip(&bytes)?;
+                for source in report.added {
+                    println!("{}  {}", source.letter, source.title);
+                }
+                if !report.skipped.is_empty() {
+                    eprintln!(
+                        "Skipped {} unsupported file(s) in {}.",
+                        report.skipped.len(),
+                        path.display()
+                    );
+                }
+            } else {
+                let source = nb.add_file(path)?;
+                println!("{}  {}", source.letter, source.title);
+            }
+        }
     }
     let started = Instant::now();
     let (mut index, report) = Index::open_synced(&nb)?;
@@ -154,20 +257,45 @@ async fn embed_new_chunks(index: &mut Index) -> CliResult {
     Ok(())
 }
 
-/// A model client that reads keys saved in Settings, else the environment.
-fn client() -> bowerbird_core::Result<genai::Client> {
-    ask::client(Arc::new(RwLock::new(Settings::load()?)))
+fn parse_thinking(raw: &str) -> Result<Thinking, Box<dyn std::error::Error>> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "default" => Ok(Thinking::Default),
+        "off" | "none" | "0" => Ok(Thinking::Off),
+        "low" => Ok(Thinking::Low),
+        "medium" => Ok(Thinking::Medium),
+        "high" => Ok(Thinking::High),
+        other => Err(format!(
+            "Unknown --thinking value \"{other}\". Use default, off, low, medium, or high."
+        )
+        .into()),
+    }
 }
 
-async fn run_ask(name: &str, question: &str, model: &str, deep: bool) -> CliResult {
+async fn run_ask(
+    name: &str,
+    question: &str,
+    model_arg: Option<&str>,
+    thinking_arg: Option<&str>,
+    deep: bool,
+) -> CliResult {
     let started = Instant::now();
     let nb = open_existing(name)?;
     let (index, _) = Index::open_synced(&nb)?;
-    let client = client()?;
+    let settings = Settings::load()?;
+    let (model, thinking) = settings.for_notebook(&nb.chat);
+    let model = model_arg.map_or(model, str::to_string);
+    let thinking = thinking_arg
+        .map(parse_thinking)
+        .transpose()?
+        .unwrap_or(thinking);
+    let shared = Arc::new(RwLock::new(settings));
+    let client = ask::client_with_thinking(shared.clone(), thinking)?;
+    let (helper_client, helper_model) = ask::helper(&shared, &client, &model)?;
     let mut ctx = if deep {
         let ids: Vec<&str> = nb.included().map(|s| s.id.as_str()).collect();
         let outline = retrieve::outline(&index, &nb, &ids, true)?;
-        let picks = ask::pick_sections(&client, model, &nb, &outline, question).await?;
+        let picks =
+            ask::pick_sections(&helper_client, &helper_model, &nb, &outline, question).await?;
         retrieve::gather_with_sections(&index, &nb, question, &picks)?
     } else {
         retrieve::gather(&index, &nb, question)?
@@ -186,7 +314,7 @@ async fn run_ask(name: &str, question: &str, model: &str, deep: bool) -> CliResu
     let mut out = std::io::stdout().lock();
     let answer = ask::answer(
         &client,
-        model,
+        &model,
         &ask::system_prompt(&nb.chat),
         started,
         question,
@@ -201,7 +329,7 @@ async fn run_ask(name: &str, question: &str, model: &str, deep: bool) -> CliResu
                     let mark = if c.verified { "" } else { "?" };
                     write!(out, "[{}{page}{mark}]", c.letter)
                 }
-                Event::Thinking => Ok(()),
+                Event::Thinking(_) => Ok(()),
             };
             let _ = out.flush();
         },

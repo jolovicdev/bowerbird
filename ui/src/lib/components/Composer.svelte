@@ -1,12 +1,19 @@
 <script lang="ts">
+	import type { ModelProfile } from '#lib/api.ts';
+
 	let {
 		sourceCount,
 		busy = false,
+		profiles = [],
+		selectedProfile = $bindable(''),
 		onask,
 		onstop
 	}: {
 		sourceCount: number;
 		busy?: boolean;
+		profiles?: ModelProfile[];
+		/** Name of a saved profile selected for this question, or '' for notebook/Settings default. */
+		selectedProfile?: string;
 		onask: (question: string, deep: boolean) => void;
 		onstop: () => void;
 	} = $props();
@@ -68,6 +75,14 @@
 		onkeydown={keydown}
 	></textarea>
 	<div class="controls">
+		{#if profiles.length > 0}
+			<select class="profile-select" aria-label="Model profile" bind:value={selectedProfile} disabled={busy}>
+				<option value="">Default model</option>
+				{#each profiles as p (p.name)}
+					<option value={p.name}>{p.name}</option>
+				{/each}
+			</select>
+		{/if}
 		<label class="deep">
 			<input class="check" type="checkbox" bind:checked={deep} aria-describedby="deep-hint" />
 			Deep search
@@ -116,6 +131,20 @@
 		display: flex;
 		gap: 0.75rem;
 		align-items: center;
+	}
+	.profile-select {
+		max-width: 9.5rem;
+		padding: 0.25rem 0.45rem;
+		border: 1px solid var(--line);
+		border-radius: 4px;
+		background: var(--page);
+		color: var(--ink-2);
+		font-size: var(--t-xs);
+		font-style: italic;
+	}
+	.profile-select:focus {
+		outline: 1px solid var(--ink);
+		color: var(--ink);
 	}
 	.deep {
 		display: flex;

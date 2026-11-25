@@ -9,7 +9,10 @@
 		covered,
 		onretry,
 		oncontents,
+		onsearch,
 		onstyle,
+		onexportzip,
+		onexportbib,
 		onrenamed
 	}: {
 		notebook: Notebook | null;
@@ -19,7 +22,10 @@
 		covered: boolean;
 		onretry: () => void;
 		oncontents: () => void;
+		onsearch: () => void;
 		onstyle: () => void;
+		onexportzip: () => void;
+		onexportbib: () => void;
 		onrenamed: (next: Notebook) => void;
 	} = $props();
 
@@ -28,6 +34,7 @@
 	let renaming = $state(false);
 	let newTitle = $state('');
 	let deleting = $state(false);
+	let exporting = $state(false);
 	let titleError = $state<string | null>(null);
 	let titleVisible = $state(true);
 	let heading = $state<HTMLElement>();
@@ -104,6 +111,9 @@
 		<span class="head-title" class:shown={!titleVisible} aria-hidden="true">{notebook.title}</span>
 		{#if !renaming && !deleting}
 			<span class="tools">
+				{#if notebook.sources.length > 0}
+					<button class="action quiet" title="Search this notebook (Ctrl+K)" onclick={onsearch}>Search</button>
+				{/if}
 				<button
 					class="action quiet"
 					aria-label="Answer style{notebook.chat.goal !== 'default' ? `: ${STYLE_NAMES[notebook.chat.goal]}` : ''}"
@@ -111,6 +121,33 @@
 				>
 					<span class="long">Answer style</span><span class="short">Style</span>{#if notebook.chat.goal !== 'default'}: {STYLE_NAMES[notebook.chat.goal]}{/if}
 				</button>
+				{#if exporting}
+					<span class="export-group">
+						<button
+							class="action"
+							onclick={() => {
+								exporting = false;
+								onexportzip();
+							}}
+						>
+							ZIP
+						</button>
+						{#if notebook.sources.length > 0}
+							<button
+								class="action"
+								onclick={() => {
+									exporting = false;
+									onexportbib();
+								}}
+							>
+								BibTeX
+							</button>
+						{/if}
+						<button class="action quiet" onclick={() => (exporting = false)}>Cancel</button>
+					</span>
+				{:else}
+					<button class="action quiet" onclick={() => (exporting = true)}>Export</button>
+				{/if}
 				<button class="action quiet" bind:this={renameButton} onclick={startRename}>Rename</button>
 				<button class="action quiet" bind:this={deleteButton} onclick={startDelete}>Delete</button>
 			</span>
@@ -201,8 +238,14 @@
 	}
 	.tools {
 		display: flex;
-		gap: 1.25rem;
+		gap: 1.1rem;
+		align-items: baseline;
 		margin-left: auto;
+	}
+	.export-group {
+		display: inline-flex;
+		gap: 0.65rem;
+		align-items: baseline;
 	}
 	.title-block {
 		grid-area: title;

@@ -242,9 +242,9 @@ async fn report_job(
     started: Instant,
     tx: tokio::sync::mpsc::UnboundedSender<SseEvent>,
 ) -> ApiResult<()> {
-    let model = state.settings().chat_model().to_string();
-    let client = ask::client(state.settings.clone())?;
     let (nb, ctx, prompt) = prepare(&state, &slug, &body.topic, report::REQUEST.into()).await?;
+    let (model, thinking) = state.settings().for_notebook(&nb.chat);
+    let client = ask::client_with_thinking(state.settings.clone(), thinking)?;
     let title = report::title(body.kind, &body.topic, &nb.title);
     send_event(&tx, "note", &serde_json::json!({ "title": title }));
     let written = ask::answer(
@@ -259,7 +259,7 @@ async fn report_job(
         |event| match event {
             ask::Event::Text(text) => send_event(&tx, "text", text),
             ask::Event::Citation(c) => send_event(&tx, "cite", c),
-            ask::Event::Thinking => {}
+            ask::Event::Thinking(text) => send_event(&tx, "thinking", text),
         },
     )
     .await?;

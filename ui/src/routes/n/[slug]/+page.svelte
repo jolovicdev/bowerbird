@@ -1,31 +1,25 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { MediaQuery } from 'svelte/reactivity';
-	import { goto, replaceState } from '$app/navigation';
+	import { replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import {
 		api,
-		ask,
 		describe,
-		markdownOf,
-		UPLOAD_MB,
-		writeReport as streamReport,
-		type AudioFormat,
 		type ChatStyle,
-		type ChatSummary,
-		type Citation,
-		type Difficulty,
 		type GuideState,
+		type ModelProfile,
 		type Notebook,
 		type NoteSummary,
-		type Piece,
-		type ReportKind,
-		type Reading,
-		type Source,
-		type StudyKind,
-		type StudySummary,
-		type Turn
+		type Source
 	} from '#lib/api.ts';
+	import { Additions } from '#lib/additions.svelte.ts';
+	import { Conversation, scroller } from '#lib/conversation.svelte.ts';
+	import { downloadBlob } from '#lib/drop.ts';
+	import { Notices, type Notice } from '#lib/notices.svelte.ts';
+	import { ReportDrafts } from '#lib/reports.svelte.ts';
+	import { SheetState } from '#lib/sheet.svelte.ts';
+	import { StudyRuns } from '#lib/studio.svelte.ts';
 	import AddSources from '#lib/components/AddSources.svelte';
 	import Composer from '#lib/components/Composer.svelte';
 	import Contents from '#lib/components/Contents.svelte';
@@ -35,13 +29,13 @@
 	import NotebookHeading from '#lib/components/NotebookHeading.svelte';
 	import NotePane from '#lib/components/NotePane.svelte';
 	import ReportDialog from '#lib/components/ReportDialog.svelte';
+	import SearchPane from '#lib/components/SearchPane.svelte';
 	import SourcePane from '#lib/components/SourcePane.svelte';
 	import StudyDialog from '#lib/components/StudyDialog.svelte';
 	import StudyPane from '#lib/components/StudyPane.svelte';
 	import StyleDialog from '#lib/components/StyleDialog.svelte';
 	import TableDialog from '#lib/components/TableDialog.svelte';
 	import TurnView from '#lib/components/Turn.svelte';
-	import { SheetState } from '#lib/sheet.svelte.ts';
 
 	const slug = $derived(page.params.slug ?? '');
 	// Below this width there is no margin, so passages open in a sheet over the text.
@@ -50,42 +44,15 @@
 	const wide = new MediaQuery('min-width: 1240px');
 
 	let notebook = $state<Notebook | null>(null);
-	let turns = $state<Turn[]>([]);
 	let error = $state<string | null>(null);
-	let notice = $state<{ text: string; problem: boolean } | null>(null);
-	/** Read out by screen readers when something finishes. */
-	let announcement = $state('');
-
-	let live = $state<Turn | null>(null);
-	let liveError = $state<string | null>(null);
-	let liveStopped = $state(false);
-	let reading = $state<Reading | null>(null);
-	let thinking = $state(false);
-	let liveSince = $state(0);
-	let controller: AbortController | null = null;
-
-	let pending = $state<string[]>([]);
-	let fresh = $state(new Set<string>());
-
-	let chats = $state<ChatSummary[]>([]);
-	/** The conversation on the page; null until its first question is asked. */
-	let chat = $state<string | null>(null);
 	let notes = $state<NoteSummary[]>([]);
-	let studies = $state<StudySummary[]>([]);
-	let writing = $state<StudyKind[]>([]);
-	let reports = $state<string[]>([]);
-	/** A report being written, shown as it arrives. */
-	let draft = $state<{
-		title: string;
-		pieces: Piece[];
-		citations: Citation[];
-		error: string | null;
-	} | null>(null);
+	let profiles = $state<ModelProfile[]>([]);
+	let defaultModel = $state('');
+	/** Name of the saved profile picked for the next question, or '' for the notebook's own. */
+	let selectedProfile = $state('');
 	let guide = $state<GuideState | null>(null);
 	let guideWriting = $state(false);
 	let guideError = $state<string | null>(null);
-
-	const sheet = new SheetState(() => slug);
 
 	let contentsOpen = $state(false);
 	let addDialog: AddSources;
@@ -95,6 +62,28 @@
 	let tableDialog: TableDialog;
 	let composer = $state<Composer>();
 	let startButton = $state<HTMLButtonElement>();
+
+	const notices = new Notices();
+	const sheet = new SheetState(() => slug);
+	const talk = new Conversation({
+		slug: () => slug,
+		notices,
+		box: () => composer,
+		choice: () => {
+			const profile = profiles.find((p) => p.name === selectedProfile);
+			return profile && { model: profile.model, thinking: profile.thinking };
+		},
+		onempty: () => writeGuideIfNeeded(),
+		onnote: () => refreshNotes()
+	});
+	const studio = new StudyRuns({ slug: () => slug, notices, sheet });
+	const reports = new ReportDrafts({ slug: () => slug, notices, sheet, onnote: () => refreshNotes() });
+	const additions = new Additions({
+		slug: () => slug,
+		notices,
+		notebook: () => notebook,
+		onadded: (next) => updateNotebook(next)
+	});
 
 	const sources = $derived(new Map((notebook?.sources ?? []).map((s) => [s.id, s])));
 	const paneSourceId = $derived.by(() => {
@@ -108,34 +97,57 @@
 	});
 	const showingPane = $derived.by(() => {
 		const pane = sheet.pane;
-		return pane !== null && (paneSource !== undefined || 'noteId' in pane || 'studyId' in pane || 'draft' in pane);
+		return (
+			pane !== null &&
+			(paneSource !== undefined ||
+				'noteId' in pane ||
+				'studyId' in pane ||
+				'draft' in pane ||
+				'search' in pane)
+		);
 	});
 	const modal = $derived(narrow.current && showingPane);
 	/** Something covers the page, so what's behind it can't be used. */
 	const covered = $derived(modal || (contentsOpen && !wide.current));
-	const busy = $derived(live !== null && liveError === null && !liveStopped);
 	const included = $derived(notebook?.sources.filter((s) => !s.excluded).length ?? 0);
 
 	async function load() {
 		error = null;
 		try {
-			const [nb, chatList, noteList, studyList, guideState] = await Promise.all([
+			const [nb, chatList, noteList, guideState] = await Promise.all([
 				api.notebook(slug),
 				api.chats(slug),
 				api.notes(slug),
-				api.studio(slug),
-				api.guide(slug)
+				api.guide(slug),
+				studio.refresh()
 			]);
 			notebook = nb;
-			chats = chatList;
+			talk.chats = chatList;
 			notes = noteList;
-			studies = studyList;
 			guide = guideState;
+			api.settings()
+				.then((s) => {
+					profiles = s.profiles;
+					defaultModel = s.chat_model;
+				})
+				.catch(() => {});
 			const wanted = page.url.searchParams.get('c');
-			chat = chatList.find((c) => c.id === wanted)?.id ?? chatList[0]?.id ?? null;
-			turns = chat ? await api.turns(slug, chat) : [];
+			talk.chat = chatList.find((c) => c.id === wanted)?.id ?? chatList[0]?.id ?? null;
+			talk.turns = talk.chat ? await api.turns(slug, talk.chat) : [];
 			await tick();
-			if (turns.length) scroller().scrollTop = scroller().scrollHeight;
+			if (talk.turns.length) scroller().scrollTop = scroller().scrollHeight;
+			const here = talk.chat ? `${page.url.pathname}?c=${encodeURIComponent(talk.chat)}` : page.url.pathname;
+			const openSourceId = page.url.searchParams.get('source');
+			const openNoteId = page.url.searchParams.get('note');
+			if (openSourceId && nb.sources.some((s) => s.id === openSourceId)) {
+				const ordParam = Number(page.url.searchParams.get('ord') ?? '0');
+				const qParam = page.url.searchParams.get('q') ?? '';
+				replaceState(here, page.state);
+				sheet.open({ sourceId: openSourceId, ord: Number.isFinite(ordParam) ? ordParam : 0, highlight: qParam });
+			} else if (openNoteId && noteList.some((n) => n.id === openNoteId)) {
+				replaceState(here, page.state);
+				sheet.open({ noteId: openNoteId });
+			}
 			if (page.url.searchParams.has('add')) {
 				replaceState(page.url.pathname, page.state);
 				if (nb.sources.length === 0) {
@@ -147,8 +159,8 @@
 			// Sent from a mind map topic: ask it in the conversation on the page.
 			const asked = page.url.searchParams.get('ask');
 			if (asked) {
-				replaceState(chat ? `${page.url.pathname}?c=${encodeURIComponent(chat)}` : page.url.pathname, page.state);
-				askQuestion(asked, false);
+				replaceState(here, page.state);
+				talk.ask(asked, false);
 				return;
 			}
 			writeGuideIfNeeded();
@@ -159,7 +171,7 @@
 
 	/** Writes the overview when the page would show it and the sources changed since. */
 	async function writeGuideIfNeeded() {
-		if (!notebook || guideWriting || turns.length || live || guide?.fresh) return;
+		if (!notebook || guideWriting || talk.turns.length || talk.live || guide?.fresh) return;
 		if (!notebook.sources.some((s) => !s.excluded && s.chunks > 0)) return;
 		guideWriting = true;
 		guideError = null;
@@ -201,41 +213,12 @@
 		}
 	}
 
-	async function openChat(id: string) {
-		if (busy) stop();
-		askedHere = false;
+	/** Hands the reader a file the server wrote, under `name`. */
+	async function download(file: Promise<Blob>, name: string) {
 		try {
-			turns = await api.turns(slug, id);
-			chat = id;
-			live = null;
-			replaceState(`${page.url.pathname}?c=${encodeURIComponent(id)}`, page.state);
-			await tick();
-			scroller().scrollTop = 0;
+			downloadBlob(await file, name);
 		} catch (e) {
-			notice = { text: describe(e), problem: true };
-		}
-	}
-
-	async function newChat() {
-		if (busy) stop();
-		askedHere = false;
-		chat = null;
-		turns = [];
-		live = null;
-		replaceState(page.url.pathname, page.state);
-		scroller().scrollTop = 0;
-		composer?.focus();
-		writeGuideIfNeeded();
-	}
-
-	async function deleteChat() {
-		if (!chat) return;
-		try {
-			await api.deleteChat(slug, chat);
-			chats = await api.chats(slug);
-			await newChat();
-		} catch (e) {
-			notice = { text: describe(e), problem: true };
+			notices.failed(e);
 		}
 	}
 
@@ -249,119 +232,7 @@
 			await refreshNotes();
 			sheet.open({ noteId: note.id });
 		} catch (e) {
-			notice = { text: describe(e), problem: true };
-		}
-	}
-
-	/** Notes made from answers, by the answer's time, so the answer can open its note. */
-	let savedNotes = $state(new Map<number, string>());
-	/** A question was asked on this page, so the newest turn keeps a screen's height. */
-	let askedHere = $state(false);
-
-	async function saveAnswer(turn: Turn): Promise<string | null> {
-		try {
-			const note = await api.createNote(slug, turn.question, markdownOf(turn.pieces, turn.citations));
-			savedNotes.set(turn.ts, note.id);
-			savedNotes = new Map(savedNotes);
-			await refreshNotes();
-			announcement = 'Saved to notes.';
-			return null;
-		} catch (e) {
-			return describe(e);
-		}
-	}
-
-	async function createStudy(
-		kind: StudyKind,
-		count: number,
-		difficulty: Difficulty,
-		topic: string,
-		collect = '',
-		format: AudioFormat = 'deep-dive'
-	) {
-		writing.push(kind);
-		const what = {
-			flashcards: 'Writing flashcards',
-			quiz: 'Writing a quiz',
-			mindmap: 'Drawing a mind map',
-			table: 'Building a table',
-			slides: 'Making slides',
-			infographic: 'Laying out an infographic',
-			audio: 'Writing an audio overview'
-		}[kind];
-		notice = { text: `${what} from the sources. It opens when ready, usually within a minute.`, problem: false };
-		try {
-			const set = await api.createStudy(slug, kind, count, difficulty, topic, collect, format);
-			studies = await api.studio(slug);
-			announcement = {
-				flashcards: 'Flashcards ready.',
-				quiz: 'Quiz ready.',
-				mindmap: 'Mind map ready.',
-				table: 'Table ready.',
-				slides: 'Slides ready.',
-				infographic: 'Infographic ready.',
-				audio: 'Audio overview script ready; recording it now.'
-			}[kind];
-			if (notice?.text.startsWith(what)) notice = null;
-			if (PAGES[kind]) goto(`/n/${encodeURIComponent(slug)}/${PAGES[kind]}/${set.id}`);
-			else if (!sheet.pane) sheet.open({ studyId: set.id });
-		} catch (e) {
-			notice = { text: describe(e), problem: true };
-		} finally {
-			writing.splice(writing.indexOf(kind), 1);
-		}
-	}
-
-	/** Study sets that open on a page of their own rather than in the sheet. */
-	const PAGES: Partial<Record<StudyKind, string>> = { mindmap: 'map', slides: 'slides', infographic: 'infographic' };
-
-	const REPORT_NAMES: Record<ReportKind, string> = {
-		'study-guide': 'study guide',
-		briefing: 'briefing',
-		timeline: 'timeline',
-		faq: 'FAQ',
-		custom: 'report'
-	};
-
-	async function writeReport(kind: ReportKind, topic: string, instructions: string) {
-		const name = REPORT_NAMES[kind];
-		reports.push(name);
-		const unlist = () => reports.includes(name) && reports.splice(reports.indexOf(name), 1);
-		draft = { title: `Writing a ${name}…`, pieces: [], citations: [], error: null };
-		const current = draft;
-		if (!sheet.pane) sheet.open({ draft: true });
-		const fail = (message: string) => {
-			current.error = message;
-			if (!(sheet.pane && 'draft' in sheet.pane)) notice = { text: message, problem: true };
-		};
-		try {
-			await streamReport(slug, kind, topic, instructions, {
-				note: (note) => {
-					current.title = note.title;
-				},
-				text: (text) => {
-					const last = current.pieces.at(-1);
-					if (last && 'text' in last) last.text += text;
-					else current.pieces.push({ text });
-				},
-				cite: (citation) => {
-					current.citations.push(citation);
-					current.pieces.push({ cite: current.citations.length - 1 });
-				},
-				done: (note) => {
-					announcement = 'Report ready.';
-					unlist();
-					refreshNotes();
-					// The draft becomes the note, in the same sheet and history entry.
-					if (sheet.pane && 'draft' in sheet.pane) sheet.pane = { noteId: note.id };
-					if (draft === current) draft = null;
-				},
-				error: fail
-			});
-		} catch (e) {
-			fail(describe(e));
-		} finally {
-			unlist();
+			notices.failed(e);
 		}
 	}
 
@@ -380,7 +251,7 @@
 			for (const source of changed) next = await api.setExcluded(slug, source.id, excluded);
 			if (next) updateNotebook(next);
 		} catch (e) {
-			notice = { text: describe(e), problem: true };
+			notices.failed(e);
 		}
 	}
 
@@ -404,161 +275,32 @@
 		try {
 			updateNotebook(await api.removeSource(slug, id));
 			sheet.close();
-			notice = { text: `Removed ${title}.`, problem: false };
+			notices.say(`Removed ${title}.`);
 			return null;
 		} catch (e) {
 			return describe(e);
 		}
 	}
 
-	const scroller = () => document.scrollingElement ?? document.documentElement;
-
-	/** Brings a new question to the top of the screen, so its answer is read
-	 * from its first line as it arrives, not chased from the bottom. */
-	async function revealQuestion() {
-		await tick();
-		document.querySelector('main .turn:last-of-type .question')?.scrollIntoView({ block: 'start' });
-	}
-
-	async function askQuestion(question: string, deep: boolean) {
-		controller?.abort();
-		controller = new AbortController();
-		const signal = controller.signal;
-		live = {
-			ts: 0,
-			question,
-			model: '',
-			pieces: [],
-			citations: [],
-			timings: { request_ms: 0, first_token_ms: null, total_ms: 0 },
-			deep
-		};
-		liveError = null;
-		liveStopped = false;
-		reading = null;
-		thinking = false;
-		liveSince = Date.now();
-		announcement = '';
-		askedHere = true;
-		revealQuestion();
-		const turn = live;
-		const fail = (message: string) => {
-			liveError = message;
-			composer?.restore(question);
-		};
+	async function rereadSource(): Promise<string | null> {
+		if (!paneSource) return null;
 		try {
-			await ask(
-				slug,
-				chat,
-				question,
-				deep,
-				{
-					passages: (r) => {
-						reading = r;
-						chat = r.chat;
-					},
-					thinking: () => (thinking = true),
-					text: (text) => {
-						const last = turn.pieces.at(-1);
-						if (last && 'text' in last) last.text += text;
-						else turn.pieces.push({ text });
-					},
-					cite: (citation) => {
-						turn.citations.push(citation);
-						turn.pieces.push({ cite: turn.citations.length - 1 });
-					},
-					done: (saved) => {
-						turns.push(saved);
-						live = null;
-						if (page.url.searchParams.get('c') !== chat) {
-							replaceState(`${page.url.pathname}?c=${encodeURIComponent(chat ?? '')}`, page.state);
-						}
-						api.chats(slug).then((list) => (chats = list));
-						const missing = saved.citations.filter((c) => !c.verified).length;
-						announcement = `Answer ready, with ${saved.citations.length} citations${missing ? `, ${missing} not found in the sources` : ''}.`;
-					},
-					error: fail
-				},
-				signal
-			);
-			if (live === turn && !liveError && !liveStopped) fail('The answer broke off before it finished.');
-		} catch (e) {
-			if (!signal.aborted) fail(describe(e));
-		}
-	}
-
-	function retry() {
-		if (!live) return;
-		composer?.forget(live.question);
-		askQuestion(live.question, live.deep);
-	}
-
-	function stop() {
-		controller?.abort();
-		liveStopped = true;
-	}
-
-	const lettersList = (letters: string[]) =>
-		letters.length < 3 ? letters.join(' and ') : `${letters.slice(0, -1).join(', ')} and ${letters.at(-1)}`;
-
-	/**
-	 * Runs an add, whose work resolves to the updated notebook, or null when
-	 * nothing was added. Resolves to an error message, or null when it worked.
-	 */
-	async function adding(names: string[], work: () => Promise<Notebook | null>): Promise<string | null> {
-		pending.push(...names);
-		notice = null;
-		const before = new Set(notebook?.sources.map((s) => s.id));
-		try {
-			const updated = await work();
-			if (!updated) return null;
-			fresh = new Set(updated.sources.filter((s) => !before.has(s.id)).map((s) => s.id));
-			updateNotebook(updated);
-			if (updated.already?.length) {
-				notice = { text: `Already in this notebook as ${lettersList(updated.already)}.`, problem: false };
-			} else if (fresh.size) {
-				announcement = fresh.size === 1 ? 'Source added.' : `${fresh.size} sources added.`;
-			}
+			updateNotebook(await api.rereadSource(slug, paneSource.id));
+			notices.say(`Re-reading ${paneSource.title} with the current OCR script.`);
 			return null;
 		} catch (e) {
 			return describe(e);
-		} finally {
-			for (const name of names) pending.splice(pending.indexOf(name), 1);
 		}
 	}
-
-	async function addFiles(files: File[]) {
-		const problems = new Set<string>();
-		await adding(
-			files.map((f) => f.name),
-			async () => {
-				// One request per file: the server's limit covers a whole request,
-				// and a file it refuses leaves the others to be added.
-				let updated: Notebook | null = null;
-				const already: string[] = [];
-				for (const file of files) {
-					if (file.size > UPLOAD_MB * 2 ** 20) {
-						problems.add(`Can't add ${file.name}. A file can be up to ${UPLOAD_MB} MB.`);
-						continue;
-					}
-					try {
-						updated = await api.addFiles(slug, [file]);
-						already.push(...(updated.already ?? []));
-					} catch (e) {
-						problems.add(describe(e));
-					}
-				}
-				return updated && { ...updated, already };
-			}
-		);
-		if (problems.size) notice = { text: [...problems].join(' '), problem: true };
-	}
-	const addUrl = (url: string) => adding([url], () => api.addUrl(slug, url));
-	const addText = (title: string, text: string) => adding([title || 'Pasted text'], () => api.addText(slug, title, text));
 
 	function shortcut(e: KeyboardEvent) {
 		const target = e.target as HTMLElement;
 		const typing = target.closest('input, textarea, [contenteditable]') !== null;
+		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && notebook && notebook.sources.length > 0) {
+			e.preventDefault();
+			sheet.open({ search: true });
+			return;
+		}
 		if (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey && composer) {
 			e.preventDefault();
 			composer.focus();
@@ -566,11 +308,20 @@
 	}
 </script>
 
-{#snippet noticeLine(note: { text: string; problem: boolean })}
+{#snippet noticeLine(note: Notice)}
+	{@const thought = note.thought}
 	<p class="notice" class:problem={note.problem} role={note.problem ? 'alert' : 'status'}>
 		{note.text}
-		<button class="action" onclick={() => (notice = null)}>Dismiss</button>
+		{#if thought?.text.trim()}
+			<button class="action" onclick={() => (thought.shown = !thought.shown)}>
+				{thought.shown ? 'Hide thinking' : 'Show thinking'}
+			</button>
+		{/if}
+		<button class="action" onclick={() => (notices.notice = null)}>Dismiss</button>
 	</p>
+	{#if thought?.shown && thought.text.trim()}
+		<div class="studio-thinking" role="region" aria-label="Studio model thinking">{thought.text}</div>
+	{/if}
 {/snippet}
 
 <svelte:head><title>{notebook ? `${notebook.title} · Bowerbird` : 'Bowerbird'}</title></svelte:head>
@@ -587,7 +338,10 @@
 		{covered}
 		onretry={load}
 		oncontents={() => (contentsOpen = true)}
+		onsearch={() => sheet.open({ search: true })}
 		onstyle={() => notebook && styleDialog.show(notebook.chat)}
+		onexportzip={() => download(api.exportNotebook(slug), `${slug}.zip`)}
+		onexportbib={() => download(api.exportBibtex(slug), `${slug}.bib`)}
 		onrenamed={(next) => (notebook = next)}
 	/>
 
@@ -597,28 +351,27 @@
 		active={paneItem}
 		ready={notebook !== null}
 		inert={modal}
-		{pending}
-		{fresh}
-		{chats}
-		{chat}
+		pending={additions.pending}
+		fresh={additions.fresh}
+		chats={talk.chats}
+		chat={talk.chat}
 		{notes}
-		{studies}
-		{writing}
-		{reports}
+		studies={studio.sets}
+		writing={studio.writing}
+		reports={reports.writing}
 		bind:open={contentsOpen}
 		onadd={() => addDialog.show()}
 		onopen={openSource}
 		onexclude={exclude}
-		onchat={openChat}
-		onnewchat={newChat}
+		onchat={talk.open}
+		onnewchat={talk.startNew}
 		onnote={(id) => sheet.open({ noteId: id })}
 		onnewnote={newNote}
 		onnewreport={() => reportDialog.show()}
-		onstudy={(set) =>
-			PAGES[set.kind] ? goto(`/n/${encodeURIComponent(slug)}/${PAGES[set.kind]}/${set.id}`) : sheet.open({ studyId: set.id })}
+		onstudy={studio.open}
 		onnewstudy={(kind) =>
 			kind === 'mindmap' || kind === 'infographic'
-				? createStudy(kind, 1, 'medium', '')
+				? studio.create(kind, 1, 'medium', '')
 				: kind === 'table'
 					? tableDialog.show()
 					: studyDialog.show(kind)}
@@ -626,13 +379,13 @@
 
 	<main class="text" inert={covered}>
 		{#if notebook}
-			{#if notice && notebook.sources.length === 0}{@render noticeLine(notice)}{/if}
-			{#if notebook.sources.length === 0 && pending.length === 0}
+			{#if notices.notice && notebook.sources.length === 0}{@render noticeLine(notices.notice)}{/if}
+			{#if notebook.sources.length === 0 && additions.pending.length === 0}
 				<div class="start">
 					<p>Add a PDF, a link, or pasted text to start. You can also drop files anywhere on this page.</p>
 					<button class="primary" bind:this={startButton} onclick={() => addDialog.show()}>Add sources</button>
 				</div>
-			{:else if turns.length === 0 && !live}
+			{:else if talk.turns.length === 0 && !talk.live}
 				<Guide
 					state={guide}
 					writing={guideWriting}
@@ -640,68 +393,90 @@
 					{sources}
 					active={sheet.pane && 'citations' in sheet.pane ? sheet.pane.citations : null}
 					onopen={sheet.openCitations}
-					onask={(question) => askQuestion(question, false)}
+					onask={(question) => talk.ask(question, false)}
 				/>
 			{/if}
-			{#each turns as turn, i (i)}
+			{#each talk.turns as turn, i (i)}
 				<TurnView
 					{slug}
 					{turn}
 					number={i + 1}
-					fill={askedHere && !live && i === turns.length - 1}
+					fill={talk.askedHere && !talk.live && i === talk.turns.length - 1}
 					{sources}
 					active={sheet.pane && 'citations' in sheet.pane ? sheet.pane.citations : null}
 					onopen={sheet.openCitations}
-					onsave={() => saveAnswer(turn)}
-					onopennote={savedNotes.has(turn.ts) ? () => sheet.open({ noteId: savedNotes.get(turn.ts)! }) : undefined}
+					onsave={() => talk.saveAnswer(turn)}
+					onopennote={talk.savedNotes.has(turn.ts) ? () => sheet.open({ noteId: talk.savedNotes.get(turn.ts)! }) : undefined}
 				/>
 			{/each}
-			{#if turns.length && !live}
+			{#if talk.turns.length && !talk.live}
 				<p class="chat-tools">
-					<button class="action quiet" onclick={newChat}>New conversation</button>
-					<button class="action quiet" onclick={deleteChat}>Delete this conversation</button>
+					<button class="action quiet" onclick={talk.startNew}>New conversation</button>
+					<button
+						class="action quiet"
+						onclick={() => talk.chat && download(api.exportChat(slug, talk.chat), `${slug}-${talk.chat}.md`)}
+					>
+						Export Markdown
+					</button>
+					<button class="action quiet" onclick={talk.remove}>Delete this conversation</button>
 				</p>
 			{/if}
-			{#if live}
+			{#if talk.live}
 				<TurnView
 					{slug}
-					turn={live}
-					number={turns.length + 1}
+					turn={talk.live}
+					number={talk.turns.length + 1}
 					{sources}
 					active={sheet.pane && 'citations' in sheet.pane ? sheet.pane.citations : null}
 					live
 					fill
-					error={liveError}
-					stopped={liveStopped}
-					{reading}
-					{thinking}
-					since={liveSince}
+					error={talk.liveError}
+					stopped={talk.liveStopped}
+					reading={talk.reading}
+					thinking={talk.thinking}
+					since={talk.liveSince}
 					onopen={sheet.openCitations}
-					onretry={retry}
+					onretry={talk.retry}
 				/>
 			{/if}
 			{#if notebook.sources.length > 0}
 				<div class="composer-dock">
 					<!-- Beside the composer, where the eye is on every screen size. -->
-					{#if notice}{@render noticeLine(notice)}{/if}
+					{#if notices.notice}{@render noticeLine(notices.notice)}{/if}
 					<Composer
 						bind:this={composer}
 						sourceCount={included}
-						{busy}
-						onask={askQuestion}
-						onstop={stop}
+						busy={talk.busy}
+						{profiles}
+						bind:selectedProfile
+						onask={talk.ask}
+						onstop={talk.stop}
 					/>
 				</div>
 			{/if}
 		{/if}
 	</main>
 
-	{#if sheet.pane && 'draft' in sheet.pane && draft}
+	{#if sheet.pane && 'search' in sheet.pane}
+		<SearchPane
+			{slug}
+			{modal}
+			onclose={sheet.close}
+			onpassage={(hit, q) => sheet.openSub({ sourceId: hit.source_id, ord: hit.ord, highlight: q })}
+			onnote={(hit) => sheet.open({ noteId: hit.id })}
+			onchat={(hit) => {
+				sheet.close();
+				talk.open(hit.chat_id);
+			}}
+		/>
+	{:else if sheet.pane && 'draft' in sheet.pane && reports.draft}
 		<DraftPane
-			title={draft.title}
-			pieces={draft.pieces}
-			citations={draft.citations}
-			error={draft.error}
+			title={reports.draft.title}
+			pieces={reports.draft.pieces}
+			citations={reports.draft.citations}
+			thinking={reports.draft.thinking}
+			since={reports.draft.since}
+			error={reports.draft.error}
 			{sources}
 			{modal}
 			onclose={sheet.close}
@@ -725,10 +500,7 @@
 				}}
 				onsource={(next) => {
 					updateNotebook(next);
-					notice = {
-						text: next.already?.length ? `Already a source, as ${next.already[0]}.` : 'Added the note as a source.',
-						problem: false
-					};
+					notices.say(next.already?.length ? `Already a source, as ${next.already[0]}.` : 'Added the note as a source.');
 				}}
 			/>
 		{/key}
@@ -743,12 +515,12 @@
 				onopen={sheet.openFromSheet}
 				onask={(question) => {
 					if (narrow.current) sheet.close();
-					askQuestion(question, false);
+					talk.ask(question, false);
 				}}
-				onchange={() => api.studio(slug).then((list) => (studies = list))}
+				onchange={studio.refresh}
 				ondelete={() => {
 					sheet.close();
-					api.studio(slug).then((list) => (studies = list));
+					studio.refresh();
 				}}
 			/>
 		{/key}
@@ -757,39 +529,44 @@
 			{slug}
 			source={paneSource}
 			entries={'entries' in sheet.pane ? sheet.pane.entries : null}
+			initialOrd={'ord' in sheet.pane ? (sheet.pane.ord ?? 0) : 0}
+			highlight={'highlight' in sheet.pane ? (sheet.pane.highlight ?? '') : ''}
 			{modal}
 			onclose={sheet.close}
 			onback={sheet.back ? sheet.goBack : undefined}
-			backLabel={sheet.back && 'noteId' in sheet.back
-				? 'Back to the note'
-				: sheet.back && 'draft' in sheet.back
-					? 'Back to the report'
-					: 'Back to the study set'}
+			backLabel={sheet.back && 'search' in sheet.back
+				? 'Back to search'
+				: sheet.back && 'noteId' in sheet.back
+					? 'Back to the note'
+					: sheet.back && 'draft' in sheet.back
+						? 'Back to the report'
+						: 'Back to the study set'}
 			onrename={renameSource}
 			onremove={removeSource}
 			onexclude={(excluded) => paneSource && exclude([paneSource], excluded)}
+			onreread={rereadSource}
 		/>
 	{/if}
 </div>
 
-<p class="visually-hidden" role="status">{announcement}</p>
+<p class="visually-hidden" role="status">{notices.announcement}</p>
 
-<DropZone title={notebook?.title ?? ''} enabled={notebook !== null} onfiles={addFiles} />
+<DropZone title={notebook?.title ?? ''} enabled={notebook !== null} onfiles={additions.files} />
 
 <AddSources
 	bind:this={addDialog}
-	onfiles={addFiles}
-	onurl={addUrl}
-	ontext={addText}
+	onfiles={additions.files}
+	onurl={additions.url}
+	ontext={additions.text}
 	onfind={(question) => api.research(slug, question).catch((e) => describe(e))}
 />
 <StudyDialog
 	bind:this={studyDialog}
-	oncreate={(kind, count, difficulty, topic, format) => createStudy(kind, count, difficulty, topic, '', format)}
+	oncreate={(kind, count, difficulty, topic, format) => studio.create(kind, count, difficulty, topic, '', format)}
 />
-<StyleDialog bind:this={styleDialog} onsave={saveStyle} />
-<ReportDialog bind:this={reportDialog} oncreate={writeReport} />
-<TableDialog bind:this={tableDialog} oncreate={(collect, topic) => createStudy('table', 1, 'medium', topic, collect)} />
+<StyleDialog bind:this={styleDialog} {profiles} {defaultModel} onsave={saveStyle} />
+<ReportDialog bind:this={reportDialog} oncreate={reports.write} />
+<TableDialog bind:this={tableDialog} oncreate={(collect, topic) => studio.create('table', 1, 'medium', topic, collect)} />
 
 <style>
 	/* A centered spread: sources | text | margin. The margin column stays
@@ -941,6 +718,20 @@
 		background: linear-gradient(transparent, var(--page) 1.5rem);
 	}
 
+
+	.studio-thinking {
+		max-height: 9rem;
+		margin: 0.4rem 0 0.75rem;
+		padding: 0.1rem 0 0.1rem 0.85rem;
+		overflow-y: auto;
+		border-left: 2px solid var(--line);
+		color: var(--ink-2);
+		font-size: var(--t-xs);
+		font-style: italic;
+		line-height: 1.5;
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
 
 	/* Without room for the contents column, the contents open as a drawer
 	   from the running head. */

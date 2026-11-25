@@ -53,15 +53,21 @@ server of your own, and questions and passages go nowhere else.
 ## What it does
 
 - **Sources:** PDF, Word (.docx), EPUB, Markdown, plain text, web pages,
-  YouTube captions, and audio recordings, which are transcribed on your
-  machine with Whisper. Scanned PDFs are read with OCR on your machine
-  (PP-OCRv5, Latin script including accented letters; Cyrillic and other
-  scripts aren't read yet). Pictures in web pages, Word documents and EPUBs
+  YouTube captions, and audio or video recordings (MP3, M4A, WAV, MP4, MOV,
+  MKV and more), which are transcribed on your machine with Whisper. Add
+  them one at a time, as a folder, as a `.zip` archive, or as a YouTube
+  playlist link, which adds up to 50 of its videos. Scanned PDFs are read
+  with OCR on your machine (PP-OCRv5). The script is chosen in Settings:
+  Latin, Cyrillic, Chinese and Japanese, Korean, Arabic, Devanagari, Greek,
+  Thai, Tamil or Telugu. Pictures in web pages, Word documents and EPUBs
   are kept beside their captions.
 - **Search by keyword and by meaning:** passages are found with SQLite FTS5
   (BM25) and with EmbeddingGemma vectors, fused by weighted reciprocal rank,
   so a question worded differently from the source still finds it.
-  Questions can be asked in a different language from the sources.
+  Questions can be asked in a different language from the sources. The same
+  search is there to use directly, with no model call: inside a notebook
+  (Ctrl+K) over its passages, notes and conversations, and from the library
+  page across every notebook.
 - **Notes:** save answers to notes, edit them, and add a note back as a
   source.
 - **Reports:** a study guide, briefing, timeline, FAQ, or a report you
@@ -71,6 +77,9 @@ server of your own, and questions and passages go nowhere else.
   overviews in four formats, voiced on your machine with Kokoro.
 - **Finding sources:** search the web through DuckDuckGo, SearXNG, Brave,
   Tavily or Exa, and add what you pick.
+- **Export:** a conversation as Markdown with its citations as footnotes,
+  a notebook's sources as BibTeX, and a whole notebook as a `.zip` of its
+  plain files.
 - **Runs where you work:** a web app served from your machine, a desktop app
   for Linux, macOS and Windows, and an Android app. Light and dark themes.
 
@@ -162,7 +171,17 @@ Ollama. In Settings, enter the model name (prefix it with the provider, as in
 `groq::model-name`, to choose the provider yourself) and paste the provider's
 API key. A name in Ollama's `model:tag` form, such as `qwen3.8:27b`, stays
 with Ollama. **Test model and key** sends one short message to check that they
-work, and shows the provider's reason when they don't.
+work, and shows the provider's reason when they don't. **Browse models**
+lists what a provider or your own server offers, so a name can be picked
+instead of typed.
+
+**Thinking** asks a reasoning model for less or more of it; Default sends
+nothing and leaves the model as it is. A cloud model that thinks for 3
+minutes without starting an answer is stopped. A model and thinking level
+can be saved as a profile, picked for one question, or set for one notebook
+under **Answer style**. An optional **helper model** takes the small calls
+beside an answer: translating a search, picking Deep search sections and
+writing web queries. Without one, they go to the model that answers.
 
 To use a model server on another computer, such as Ollama, LM Studio or
 llama.cpp, enter its address under **Your own server** in Settings, for
@@ -180,8 +199,9 @@ such as `DEEPSEEK_API_KEY`, works too.
 
 The local models download on first use into `~/.local/share/bowerbird/models`
 (`%LOCALAPPDATA%\bowerbird\models` on Windows): EmbeddingGemma 4-bit for
-search (200 MB) when the first source is added, the OCR models (12 MB) for
-the first scanned PDF, and the speech models when they are first used. Their
+search (200 MB) when the first source is added, the OCR models (12 MB for
+Latin script, 8 to 16 MB more for each other script) for the first scanned
+PDF, and the speech models when they are first used. Their
 licenses, including the Gemma Terms of Use that cover EmbeddingGemma, are in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

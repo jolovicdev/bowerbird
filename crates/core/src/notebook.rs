@@ -11,7 +11,6 @@
 //!   .bowerbird/index.sqlite  derived cache, rebuilt when missing
 //! ```
 
-use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,7 +18,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::doc::{self, Doc};
+use crate::settings::Thinking;
 use crate::{Error, Result, pdf, web, zipdoc};
+
+mod add;
+mod items;
+
+pub use add::{ZipImport, check_file};
+pub use items::{FIRST_CHAT, Item};
 
 /// Size of the finds palette that source colors index into.
 pub const FIND_COLORS: u8 = 8;
@@ -42,9 +48,10 @@ pub enum SourceKind {
     Audio,
 }
 
-/// Endings of the sound files Bowerbird transcribes.
+/// Endings of the audio and video files Bowerbird transcribes (extracting the
+/// default audio track from MP4/MOV/MKV containers via symphonia).
 pub const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "m4a", "aac", "wav", "ogg", "oga", "opus", "flac", "webm",
+    "mp3", "m4a", "aac", "wav", "ogg", "oga", "opus", "flac", "webm", "mp4", "m4v", "mov", "mkv",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -93,6 +100,12 @@ pub struct ChatStyle {
     pub custom: String,
     #[serde(default)]
     pub length: Length,
+    /// Optional per-notebook model override; unset uses Settings' default model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Optional per-notebook thinking override; unset uses Settings' thinking level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Thinking>,
 }
 
 /// Longest custom answer style, in characters.
@@ -113,17 +126,6 @@ pub struct Notebook {
     pub chat: ChatStyle,
     pub sources: Vec<Source>,
 }
-
-/// A file in one of the notebook's folders, by id, with its last change.
-pub struct Item {
-    pub id: String,
-    /// Unix seconds.
-    pub updated: u64,
-}
-
-/// Conversation the command line writes to, and the one conversation of
-/// notebooks made before they could hold several.
-pub const FIRST_CHAT: &str = "log";
 
 /// `$BOWERBIRD_HOME`, else `~/Bowerbird`.
 pub fn library_root() -> PathBuf {
@@ -226,20 +228,6 @@ fn refuse_links(root: &Path, dir: &Path) -> Result<()> {
 
 fn unix_secs(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
-}
-
-/// Splits a note file into its title (the first line's `# ` heading) and body.
-fn split_note(raw: &str) -> (String, String) {
-    match raw.strip_prefix("# ") {
-        Some(rest) => {
-            let (title, body) = rest.split_once('\n').unwrap_or((rest, ""));
-            (
-                title.trim().to_string(),
-                body.trim_start_matches(['\n', '\r']).to_string(),
-            )
-        }
-        None => (String::new(), raw.to_string()),
-    }
 }
 
 impl Notebook {
@@ -438,152 +426,8 @@ impl Notebook {
         self.sources.iter().filter(|s| !s.excluded)
     }
 
-    pub fn add_file(&mut self, path: &Path) -> Result<Source> {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("Untitled");
-        let bytes = std::fs::read(path)?;
-        self.add_named(name, &bytes)
-    }
-
-    /// Adds a file's contents under its original name, which decides the kind
-    /// and the fallback title.
-    pub fn add_named(&mut self, file_name: &str, bytes: &[u8]) -> Result<Source> {
-        let kind = check_file(file_name, bytes)?;
-        let path = Path::new(file_name);
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Untitled");
-        let packaged = |c: zipdoc::Converted| {
-            c.title
-                .or_else(|| first_h1(&c.markdown).map(|t| doc::strip_marks(&t)))
-        };
-        let title = match kind {
-            SourceKind::Markdown => first_h1(&String::from_utf8_lossy(bytes)),
-            SourceKind::Pdf => pdf::title(bytes),
-            SourceKind::Docx => zipdoc::docx(bytes).ok().and_then(packaged),
-            SourceKind::Epub => zipdoc::epub(bytes).ok().and_then(packaged),
-            SourceKind::Text | SourceKind::Web | SourceKind::Youtube | SourceKind::Audio => None,
-        }
-        .unwrap_or_else(|| stem.to_string());
-        let ext = match kind {
-            SourceKind::Pdf => "pdf",
-            SourceKind::Markdown => "md",
-            SourceKind::Docx => "docx",
-            SourceKind::Epub => "epub",
-            SourceKind::Text | SourceKind::Web | SourceKind::Youtube => "txt",
-            SourceKind::Audio => path.extension().and_then(|e| e.to_str()).unwrap_or("audio"),
-        };
-        let ext = ext.to_lowercase();
-        let ext = ext.as_str();
-        self.add_bytes(bytes, ext, kind, title, None)
-    }
-
-    pub fn add_text(&mut self, title: &str, text: &str) -> Result<Source> {
-        self.add_bytes(
-            text.as_bytes(),
-            "md",
-            SourceKind::Markdown,
-            title.to_string(),
-            None,
-        )
-    }
-
-    /// Fetches and adds a link. For the command line, which only this machine
-    /// runs, so the link may point anywhere.
-    pub async fn add_url(&mut self, url: &str) -> Result<Source> {
-        if let Some(existing) = self.source_with_url(url) {
-            return Ok(existing.clone());
-        }
-        let page = web::fetch(url, web::Reach::Any).await?;
-        self.add_web_page(url, &page)
-    }
-
     pub fn source_with_url(&self, url: &str) -> Option<&Source> {
         self.sources.iter().find(|s| s.url.as_deref() == Some(url))
-    }
-
-    /// Stores a page fetched with `web::fetch`. Split from `add_url` so callers
-    /// can fetch without holding a lock on the notebook. A link to a PDF adds
-    /// the PDF.
-    pub fn add_web_page(&mut self, url: &str, page: &web::Page) -> Result<Source> {
-        if let Some(existing) = self.source_with_url(url) {
-            return Ok(existing.clone());
-        }
-        if let Some(video) = &page.transcript {
-            return self.add_bytes(
-                video.markdown.as_bytes(),
-                "md",
-                SourceKind::Youtube,
-                video.title.clone(),
-                Some(url.to_string()),
-            );
-        }
-        if page.is_pdf() {
-            pdf::check(&page.bytes)?;
-            let title = pdf::title(&page.bytes).unwrap_or_else(|| web::file_name(url));
-            return self.add_bytes(
-                &page.bytes,
-                "pdf",
-                SourceKind::Pdf,
-                title,
-                Some(url.to_string()),
-            );
-        }
-        let html = page.html()?;
-        let (title, _) = web::extract(&html, Some(url))?;
-        let title = if title.trim().is_empty() {
-            url.to_string()
-        } else {
-            title
-        };
-        self.add_bytes(
-            html.as_bytes(),
-            "html",
-            SourceKind::Web,
-            title,
-            Some(url.to_string()),
-        )
-    }
-
-    fn add_bytes(
-        &mut self,
-        bytes: &[u8],
-        ext: &str,
-        kind: SourceKind,
-        title: String,
-        url: Option<String>,
-    ) -> Result<Source> {
-        let digest = Sha256::digest(bytes);
-        let id: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
-        if let Some(existing) = self.source(&id) {
-            return Ok(existing.clone());
-        }
-        let file = format!("{id}.{ext}");
-        std::fs::write(self.dir.join("sources").join(&file), bytes)?;
-        // Letters are never reused, so a citation in a saved answer can't
-        // come to mean a different source after one is removed.
-        let n = self
-            .sources
-            .iter()
-            .filter_map(|s| letter_index(&s.letter))
-            .max()
-            .map_or(0, |last| last + 1);
-        let source = Source {
-            id,
-            title,
-            kind,
-            file,
-            letter: letter_for(n),
-            color: (n % FIND_COLORS as usize) as u8,
-            url,
-            excluded: false,
-        };
-        self.sources.push(source.clone());
-        self.save()?;
-        Ok(source)
     }
 
     pub fn rename_source(&mut self, id: &str, title: &str) -> Result<Source> {
@@ -684,108 +528,6 @@ impl Notebook {
             },
         }
     }
-
-    /// The file of an item in one of the notebook's folders.
-    pub fn item_path(&self, folder: &str, id: &str, ext: &str) -> Result<PathBuf> {
-        if !valid_id(id) {
-            return Err(not_found(format!("Nothing in {folder} is called “{id}”.")));
-        }
-        Ok(self.dir.join(folder).join(format!("{id}.{ext}")))
-    }
-
-    /// Items in a folder with the given extension, most recently changed first.
-    pub fn items(&self, folder: &str, ext: &str) -> Result<Vec<Item>> {
-        let entries = match std::fs::read_dir(self.dir.join(folder)) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
-        };
-        let mut items = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(id) = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .filter(|id| valid_id(id))
-            else {
-                continue;
-            };
-            if path.extension().and_then(|e| e.to_str()) != Some(ext) {
-                continue;
-            }
-            let updated = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .map_or(0, unix_secs);
-            items.push(Item {
-                id: id.to_string(),
-                updated,
-            });
-        }
-        items.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| b.id.cmp(&a.id)));
-        Ok(items)
-    }
-
-    /// An unused id for a new item: the time in milliseconds, so ids sort by age.
-    pub fn new_item_id(&self, folder: &str, ext: &str) -> String {
-        let ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis());
-        (ms..)
-            .map(|n| n.to_string())
-            .find(|id| !self.dir.join(folder).join(format!("{id}.{ext}")).exists())
-            .expect("an unused id exists")
-    }
-
-    pub fn delete_item(&self, folder: &str, id: &str, ext: &str) -> Result<()> {
-        std::fs::remove_file(self.item_path(folder, id, ext)?).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => {
-                not_found(format!("Nothing in {folder} is called “{id}”."))
-            }
-            _ => e.into(),
-        })
-    }
-
-    pub fn append_chat(&self, chat: &str, record: &impl Serialize) -> Result<()> {
-        let line = serde_json::to_string(record).map_err(|e| Error::Invalid(e.to_string()))?;
-        let path = self.item_path("chats", chat, "jsonl")?;
-        std::fs::create_dir_all(self.dir.join("chats"))?;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        writeln!(file, "{line}")?;
-        Ok(())
-    }
-
-    /// A note's title and Markdown body.
-    pub fn read_note(&self, id: &str) -> Result<(String, String)> {
-        let raw =
-            std::fs::read_to_string(self.item_path("notes", id, "md")?).map_err(|e| {
-                match e.kind() {
-                    std::io::ErrorKind::NotFound => {
-                        not_found(format!("No note “{id}” in this notebook."))
-                    }
-                    _ => e.into(),
-                }
-            })?;
-        Ok(split_note(&raw))
-    }
-
-    pub fn write_note(&self, id: &str, title: &str, body: &str) -> Result<()> {
-        let path = self.item_path("notes", id, "md")?;
-        std::fs::create_dir_all(self.dir.join("notes"))?;
-        let title = title.trim().replace(['\n', '\r'], " ");
-        let title = if title.is_empty() {
-            "Untitled note"
-        } else {
-            &title
-        };
-        let tmp = path.with_extension("md.tmp");
-        std::fs::write(&tmp, format!("# {title}\n\n{}\n", body.trim_end()))?;
-        std::fs::rename(tmp, path)?;
-        Ok(())
-    }
 }
 
 /// Picture formats a browser shows that are saved from web pages.
@@ -797,65 +539,6 @@ pub fn image_file(src: &str, ext: &str) -> String {
     let digest = Sha256::digest(src.as_bytes());
     let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
     format!("{hex}.{ext}")
-}
-
-/// The kind of source a file becomes, or why it can't be added. Checked
-/// before anything is saved, so one bad file in an upload adds nothing.
-pub fn check_file(file_name: &str, bytes: &[u8]) -> Result<SourceKind> {
-    let ext = Path::new(file_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_lowercase)
-        .unwrap_or_default();
-    let kind = match ext.as_str() {
-        "pdf" => SourceKind::Pdf,
-        "md" | "markdown" => SourceKind::Markdown,
-        "txt" => SourceKind::Text,
-        "docx" => SourceKind::Docx,
-        "epub" => SourceKind::Epub,
-        ext if AUDIO_EXTENSIONS.contains(&ext) => SourceKind::Audio,
-        _ => {
-            return Err(Error::Invalid(format!(
-                "Can't add {file_name}: Bowerbird reads PDF, Word (.docx), EPUB, Markdown, text, and audio files (MP3, M4A, WAV, Ogg, Opus, FLAC, WebM)."
-            )));
-        }
-    };
-    let invalid = |why: &str| Error::Invalid(format!("Can't add {file_name}. {why}"));
-    match kind {
-        SourceKind::Pdf => pdf::check(bytes).map_err(|e| invalid(&e.to_string()))?,
-        // Whether a recording can be read shows when it is transcribed.
-        SourceKind::Audio if bytes.is_empty() => return Err(invalid("The file is empty.")),
-        SourceKind::Audio => {}
-        SourceKind::Docx | SourceKind::Epub => {
-            let converted = if kind == SourceKind::Docx {
-                zipdoc::docx(bytes)
-            } else {
-                zipdoc::epub(bytes)
-            }
-            .map_err(|e| invalid(&e.to_string()))?;
-            if converted.markdown.trim().is_empty() {
-                return Err(invalid("The document has no text to read."));
-            }
-        }
-        _ => match std::str::from_utf8(bytes) {
-            Ok(text) if text.trim().is_empty() => return Err(invalid("The file is empty.")),
-            Ok(_) => {}
-            Err(_) => {
-                return Err(invalid(
-                    "The file isn't UTF-8 text. Save it as UTF-8 and add it again.",
-                ));
-            }
-        },
-    }
-    Ok(kind)
-}
-
-fn first_h1(text: &str) -> Option<String> {
-    doc::markdown(text.to_string())
-        .sections
-        .into_iter()
-        .find(|s| s.depth == 1)
-        .map(|s| s.title)
 }
 
 #[cfg(test)]
@@ -990,31 +673,6 @@ mod tests {
     }
 
     #[test]
-    fn notes_keep_title_and_body_and_ids_stay_in_their_folder() {
-        let dir = std::env::temp_dir().join(format!("bowerbird-notes-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let nb = Notebook::open_or_create(&dir, "History").unwrap();
-        let id = nb.new_item_id("notes", "md");
-        let body = "The war ended in 1648 [[A0|signed in 1648]].\n\n# Not a title";
-        nb.write_note(&id, "Causes\nof the war", body).unwrap();
-        assert_eq!(
-            nb.read_note(&id).unwrap(),
-            ("Causes of the war".to_string(), format!("{body}\n"))
-        );
-        let listed: Vec<String> = nb
-            .items("notes", "md")
-            .unwrap()
-            .into_iter()
-            .map(|i| i.id)
-            .collect();
-        assert_eq!(listed, std::slice::from_ref(&id));
-        assert!(nb.item_path("notes", "../notebook", "md").is_err());
-        assert!(nb.read_note("missing").is_err());
-        nb.delete_item("notes", &id, "md").unwrap();
-        assert!(nb.items("notes", "md").unwrap().is_empty());
-    }
-
-    #[test]
     fn switched_off_sources_stay_off_after_reopening() {
         let dir = std::env::temp_dir().join(format!("bowerbird-excluded-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1038,59 +696,6 @@ mod tests {
         let long = slug(&"日本語 ".repeat(40));
         assert!(long.len() <= SLUG_MAX && !long.ends_with('-'));
         assert!(long.chars().all(|c| c.is_alphanumeric() || c == '-'));
-    }
-
-    #[test]
-    fn empty_and_non_utf8_text_files_are_refused() {
-        assert!(check_file("notes.txt", b"  \n").is_err());
-        assert!(check_file("notes.txt", &[0xff, 0xfe, 0x00]).is_err());
-        assert_eq!(
-            check_file("notes.MD", b"# Hi").unwrap(),
-            SourceKind::Markdown
-        );
-    }
-
-    #[test]
-    fn word_files_keep_their_original_and_index_by_heading() {
-        use std::io::Write;
-        let w = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#;
-        let document = format!(
-            r#"<w:document {w}><w:body><w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>Causes</w:t></w:r></w:p><w:p><w:r><w:t>Prague, 1618.</w:t></w:r></w:p></w:body></w:document>"#
-        );
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file(
-            "word/document.xml",
-            zip::write::SimpleFileOptions::default(),
-        )
-        .unwrap();
-        zip.write_all(document.as_bytes()).unwrap();
-        let bytes = zip.finish().unwrap().into_inner();
-
-        let dir = std::env::temp_dir().join(format!("bowerbird-docx-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut nb = Notebook::open_or_create(&dir, "History").unwrap();
-        let source = nb.add_named("war.DOCX", &bytes).unwrap();
-        assert_eq!(
-            (source.kind, source.title.as_str()),
-            (SourceKind::Docx, "Causes")
-        );
-        assert!(source.file.ends_with(".docx"));
-        assert_eq!(std::fs::read(nb.source_path(&source)).unwrap(), bytes);
-        let doc = nb.extract(&source).unwrap();
-        assert_eq!(doc.text, "# Causes\n\nPrague, 1618.");
-        assert_eq!(doc.sections[0].title, "Causes");
-
-        let empty = document.replace("Causes", "").replace("Prague, 1618.", "");
-        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        zip.start_file(
-            "word/document.xml",
-            zip::write::SimpleFileOptions::default(),
-        )
-        .unwrap();
-        zip.write_all(empty.as_bytes()).unwrap();
-        let err = check_file("blank.docx", &zip.finish().unwrap().into_inner()).unwrap_err();
-        assert!(err.to_string().contains("no text"), "{err}");
-        assert!(check_file("book.epub", b"not a zip").is_err());
     }
 
     #[test]

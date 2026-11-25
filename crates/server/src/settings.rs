@@ -4,11 +4,12 @@ use std::collections::BTreeMap;
 use std::sync::PoisonError;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use bowerbird_core::ask;
+use bowerbird_core::ocr::OcrScript;
 use bowerbird_core::search::{self, SearchSettings};
-use bowerbird_core::settings::{self, Settings};
+use bowerbird_core::settings::{self, ModelProfile, Settings, Thinking};
 use serde::{Deserialize, Serialize};
 
 use crate::{ApiError, ApiResult, AppState, Body, blocking};
@@ -28,6 +29,10 @@ struct ProviderView {
 pub(crate) struct SettingsView {
     chat_model: String,
     default_model: &'static str,
+    helper_model: Option<String>,
+    thinking: Thinking,
+    profiles: Vec<ModelProfile>,
+    ocr_script: OcrScript,
     providers: Vec<ProviderView>,
     search: SearchSettings,
     /// Search services that take a key.
@@ -48,6 +53,10 @@ fn settings_view(settings: &Settings) -> SettingsView {
     SettingsView {
         chat_model: settings.chat_model().to_string(),
         default_model: ask::DEFAULT_MODEL,
+        helper_model: settings.helper_model.clone(),
+        thinking: settings.thinking,
+        profiles: settings.profiles.clone(),
+        ocr_script: settings.ocr_script,
         providers: settings::providers().into_iter().map(view).collect(),
         search: settings.search.clone(),
         search_keys: search::KEYS.into_iter().map(view).collect(),
@@ -57,6 +66,26 @@ fn settings_view(settings: &Settings) -> SettingsView {
 
 pub(crate) async fn get_settings(State(state): State<AppState>) -> Json<SettingsView> {
     Json(settings_view(&state.settings()))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ModelsQuery {
+    provider: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct ModelsView {
+    provider: String,
+    models: Vec<String>,
+}
+
+/// Lists available models from a provider or the user's own server.
+pub(crate) async fn list_models(
+    State(state): State<AppState>,
+    Query(query): Query<ModelsQuery>,
+) -> ApiResult<Json<ModelsView>> {
+    let (provider, models) = ask::list_models(state.settings.clone(), &query.provider).await?;
+    Ok(Json(ModelsView { provider, models }))
 }
 
 #[derive(Serialize)]
@@ -76,6 +105,11 @@ pub(crate) async fn test_model(State(state): State<AppState>) -> ApiResult<Json<
 pub(crate) struct SettingsUpdate {
     /// An empty name means the default model.
     chat_model: Option<String>,
+    /// An empty name clears the helper model (falls back to `chat_model`).
+    helper_model: Option<String>,
+    thinking: Option<Thinking>,
+    profiles: Option<Vec<ModelProfile>>,
+    ocr_script: Option<OcrScript>,
     /// By key variable. An empty key removes the saved one.
     #[serde(default)]
     keys: BTreeMap<String, String>,
@@ -118,6 +152,31 @@ pub(crate) async fn put_settings(
         if let Some(model) = update.chat_model {
             let model = model.trim();
             next.chat_model = (!model.is_empty()).then(|| model.to_string());
+        }
+        if let Some(helper) = update.helper_model {
+            let helper = helper.trim();
+            next.helper_model = (!helper.is_empty()).then(|| helper.to_string());
+        }
+        if let Some(thinking) = update.thinking {
+            next.thinking = thinking;
+        }
+        if let Some(profiles) = update.profiles {
+            next.profiles = profiles
+                .into_iter()
+                .filter_map(|p| {
+                    let name = p.name.trim().to_string();
+                    let model = p.model.trim().to_string();
+                    (!name.is_empty() && !model.is_empty()).then_some(ModelProfile {
+                        name,
+                        model,
+                        thinking: p.thinking,
+                    })
+                })
+                .take(50)
+                .collect();
+        }
+        if let Some(ocr_script) = update.ocr_script {
+            next.ocr_script = ocr_script;
         }
         if let Some(search) = update.search {
             next.search = search;

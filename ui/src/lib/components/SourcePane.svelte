@@ -25,18 +25,25 @@
 		slug,
 		source,
 		entries = null,
+		initialOrd = 0,
+		highlight = '',
 		modal = false,
 		onclose,
 		onback,
 		backLabel = '',
 		onrename,
 		onremove,
-		onexclude
+		onexclude,
+		onreread
 	}: {
 		slug: string;
 		source: Source;
 		/** Cited passages to show. Without them the pane shows the source itself. */
 		entries?: Entry[] | null;
+		/** Starting passage index when opening a source directly (e.g. from search). */
+		initialOrd?: number;
+		/** Optional search term to highlight in the opened passage. */
+		highlight?: string;
 		/** On phones the pane is a bottom sheet over the page. */
 		modal?: boolean;
 		onclose: () => void;
@@ -46,6 +53,7 @@
 		onrename: (title: string) => Promise<string | null>;
 		onremove: () => Promise<string | null>;
 		onexclude: (excluded: boolean) => void;
+		onreread?: () => Promise<string | null>;
 	} = $props();
 
 	// PDF text keeps the page's hard line breaks, and PDFium marks line-break
@@ -76,6 +84,48 @@
 	function segments(text: string, citations: Citation[]): { text: string; hit: boolean }[] {
 		const merged = hitRanges(text, citations);
 		const shown = readable(text);
+		const out: { text: string; hit: boolean }[] = [];
+		let at = 0;
+		for (const [start, end] of merged) {
+			if (start > at) out.push({ text: shown.slice(at, start), hit: false });
+			out.push({ text: shown.slice(start, end), hit: true });
+			at = end;
+		}
+		if (at < shown.length) out.push({ text: shown.slice(at), hit: false });
+		return out;
+	}
+
+	/** Case-insensitive match spans for interactive search query terms. */
+	function searchSpans(text: string, query: string): Span[] {
+		const terms = query
+			.trim()
+			.toLowerCase()
+			.split(/\s+/)
+			.filter((t) => t.length >= 2);
+		if (!terms.length) return [];
+		const lower = text.toLowerCase();
+		const ranges: Span[] = [];
+		for (const term of terms) {
+			let at = 0;
+			while ((at = lower.indexOf(term, at)) >= 0) {
+				ranges.push([at, at + term.length]);
+				at += term.length;
+			}
+		}
+		ranges.sort((a, b) => a[0] - b[0]);
+		const merged: Span[] = [];
+		for (const [start, end] of ranges) {
+			const last = merged.at(-1);
+			if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+			else merged.push([start, end]);
+		}
+		return merged;
+	}
+
+	function searchSegments(text: string, query: string): { text: string; hit: boolean }[] {
+		const shown = readable(text);
+		const merged = searchSpans(shown, query);
+		if (!merged.length) return [{ text: shown, hit: false }];
 		const out: { text: string; hit: boolean }[] = [];
 		let at = 0;
 		for (const [start, end] of merged) {
@@ -183,6 +233,7 @@
 	$effect(() => {
 		if (entries || chunks === 0) return;
 		const id = sourceId;
+		const targetOrd = Math.max(0, Math.min(initialOrd, chunks - 1));
 		outline = null;
 		api.outline(slug, id)
 			.then((headings) => {
@@ -191,12 +242,13 @@
 				contentsOpen = headings.length <= 12;
 			})
 			.catch(() => (outline = []));
-		read(0);
+		read(targetOrd);
 	});
 
 	let renaming = $state(false);
 	let newTitle = $state('');
 	let confirming = $state(false);
+	let rereading = $state(false);
 	let actionError = $state<string | null>(null);
 	let renameField = $state<HTMLInputElement>();
 
@@ -216,6 +268,13 @@
 
 	async function remove() {
 		actionError = await onremove();
+	}
+
+	async function reread() {
+		if (!onreread) return;
+		rereading = true;
+		actionError = await onreread();
+		rereading = false;
 	}
 </script>
 
@@ -309,6 +368,11 @@
 			{#if !renaming && !confirming}
 				<p class="actions">
 					<button class="action" onclick={startRename}>Rename</button>
+					{#if source.scanned && !source.reading && onreread}
+						<button class="action" disabled={rereading} onclick={reread}>
+							{rereading ? 'Re-reading…' : 'Re-read scan'}
+						</button>
+					{/if}
 					<button class="action" onclick={() => ((confirming = true), (actionError = null))}>Remove</button>
 				</p>
 			{/if}
@@ -414,7 +478,12 @@
 			{:else}
 				<p class="entry-where">{where(passage)}</p>
 				{#if isMarkdown}
-					{@render markdown(passage.text, [], passage.figures)}
+					{@render markdown(passage.text, highlight ? searchSpans(passage.text, highlight) : [], passage.figures)}
+				{:else if highlight}
+					<p class="passage">
+						{#each searchSegments(passage.text, highlight) as part, i (i)}{#if part.hit}<mark>{part.text}</mark
+								>{:else}{part.text}{/if}{/each}
+					</p>
 				{:else}
 					<p class="passage">{readable(passage.text)}</p>
 				{/if}

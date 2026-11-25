@@ -4,6 +4,7 @@ pub mod cite;
 pub mod doc;
 pub mod download;
 pub mod embed;
+pub mod export;
 pub mod http;
 pub mod index;
 pub mod notebook;

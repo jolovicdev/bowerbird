@@ -168,24 +168,26 @@ fn in_order(passage: &str, parts: &[String], from: usize, elided: bool) -> bool 
         .any(|(at, _)| in_order(passage, rest, from + at + part.len(), true))
 }
 
-/// Length of normalized text in letters. A Han, kana or Hangul character
-/// writes a whole syllable or word, and a sentence takes about a third as many
-/// of them, so each counts as three.
+/// A Han, kana or Hangul character, which writes a whole syllable or word.
+pub(crate) fn writes_syllables(c: char) -> bool {
+    matches!(c,
+        '\u{1100}'..='\u{11FF}'
+        | '\u{3040}'..='\u{30FF}'
+        | '\u{3130}'..='\u{318F}'
+        | '\u{31F0}'..='\u{31FF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}'
+        | '\u{AC00}'..='\u{D7AF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FF66}'..='\u{FF9F}'
+        | '\u{20000}'..='\u{323AF}')
+}
+
+/// Length of normalized text in letters. A sentence takes about a third as
+/// many syllable characters as letters, so each counts as three.
 fn length_in_letters(s: &str) -> usize {
     s.chars()
-        .map(|c| match c {
-            '\u{1100}'..='\u{11FF}'
-            | '\u{3040}'..='\u{30FF}'
-            | '\u{3130}'..='\u{318F}'
-            | '\u{31F0}'..='\u{31FF}'
-            | '\u{3400}'..='\u{4DBF}'
-            | '\u{4E00}'..='\u{9FFF}'
-            | '\u{AC00}'..='\u{D7AF}'
-            | '\u{F900}'..='\u{FAFF}'
-            | '\u{FF66}'..='\u{FF9F}'
-            | '\u{20000}'..='\u{323AF}' => 3,
-            _ => 1,
-        })
+        .map(|c| if writes_syllables(c) { 3 } else { 1 })
         .sum()
 }
 

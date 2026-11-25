@@ -75,9 +75,8 @@ pub async fn queries(client: &genai::Client, model: &str, question: &str) -> Res
     })
 }
 
-/// Searches with the backend chosen in Settings.
-pub async fn search(settings: &Settings, query: &str) -> Result<Vec<Hit>> {
-    let http = crate::http::client()
+fn client() -> Result<reqwest::Client> {
+    crate::http::client()
         .timeout(TIMEOUT)
         .user_agent(concat!(
             "Mozilla/5.0 (compatible; Bowerbird/",
@@ -85,23 +84,19 @@ pub async fn search(settings: &Settings, query: &str) -> Result<Vec<Hit>> {
             ")"
         ))
         .build()
-        .map_err(|e| Error::Http(e.to_string()))?;
+        .map_err(|e| Error::Http(e.to_string()))
+}
+
+/// Searches with the backend chosen in Settings.
+pub async fn search(settings: &Settings, query: &str) -> Result<Vec<Hit>> {
+    let http = client()?;
     let key = |env: &str, name: &str| {
         settings
             .key(env)
             .ok_or_else(|| Error::Invalid(format!("No API key for {name}. Add one in Settings.")))
     };
     let hits = match settings.search.backend {
-        Backend::DuckDuckGo => {
-            let url = url("https://html.duckduckgo.com/html/", &[("q", query)])?;
-            let page = text(|| http.get(url.clone()), "DuckDuckGo").await?;
-            parse_duckduckgo(&page).ok_or_else(|| {
-                Error::Http(
-                    "DuckDuckGo is refusing automated searches right now. Set up SearXNG or add a search API key in Settings."
-                        .into(),
-                )
-            })?
-        }
+        Backend::DuckDuckGo => duckduckgo(&http, query).await?,
         Backend::SearXng => {
             let base = settings
                 .search
@@ -264,38 +259,106 @@ fn parse_exa(raw: &str) -> Vec<Hit> {
     hits(json(raw).get("results"), "title", "url", "text")
 }
 
-/// Results from DuckDuckGo's HTML page; None when the page holds none, which
-/// is how a refusal looks.
-fn parse_duckduckgo(page: &str) -> Option<Vec<Hit>> {
-    let mut out = Vec::new();
-    for block in page.split("class=\"result__a\"").skip(1) {
-        let Some(href) = attribute(block, "href") else {
-            continue;
-        };
-        let title = inner_text(block);
-        let snippet = block
-            .split_once("class=\"result__snippet\"")
-            .map(|(_, rest)| inner_text(rest))
-            .unwrap_or_default();
-        let url = decode_entities(&href);
-        // Links go through DuckDuckGo's redirect, with the target in `uddg`.
-        let url = reqwest::Url::parse(&format!("https:{}", url.trim_start_matches("https:")))
-            .ok()
-            .and_then(|u| {
-                u.query_pairs()
-                    .find(|(k, _)| k == "uddg")
-                    .map(|(_, v)| v.into_owned())
-            })
-            .unwrap_or(url);
-        if url.starts_with("http") && !title.is_empty() {
-            out.push(Hit {
-                title,
-                url,
-                snippet,
-            });
+/// Reads the results out of a page; None when it finds none.
+type PageReader = fn(&str) -> Option<Vec<Hit>>;
+
+/// DuckDuckGo's two pages of plain results, each with the function that
+/// reads it. They are laid out differently and change at different times,
+/// so the second is read when the first has no results Bowerbird can find.
+const DUCKDUCKGO_PAGES: [(&str, PageReader); 2] = [
+    ("https://html.duckduckgo.com/html/", parse_duckduckgo),
+    ("https://lite.duckduckgo.com/lite/", parse_duckduckgo_lite),
+];
+
+/// What DuckDuckGo's page for a search it won't run has all over it.
+const DUCKDUCKGO_REFUSAL: &str = "anomaly-modal";
+
+async fn duckduckgo(http: &reqwest::Client, query: &str) -> Result<Vec<Hit>> {
+    for (address, parse) in DUCKDUCKGO_PAGES {
+        let url = url(address, &[("q", query)])?;
+        let page = text(|| http.get(url.clone()), "DuckDuckGo").await?;
+        if let Some(hits) = parse(&page) {
+            return Ok(hits);
+        }
+        // A refusal covers both pages, and asking again only extends it.
+        if page.contains(DUCKDUCKGO_REFUSAL) {
+            return Err(Error::Http(
+                "DuckDuckGo is refusing automated searches right now. Set up SearXNG or add a search API key in Settings."
+                    .into(),
+            ));
         }
     }
-    (!out.is_empty()).then_some(out)
+    Err(Error::Http(
+        "Bowerbird couldn't read DuckDuckGo's results. Its pages may have changed: look for a newer Bowerbird, or set up SearXNG or add a search API key in Settings."
+            .into(),
+    ))
+}
+
+/// Results from DuckDuckGo's HTML page; None when Bowerbird finds none in it.
+fn parse_duckduckgo(page: &str) -> Option<Vec<Hit>> {
+    let hits: Vec<Hit> = page
+        .split("class=\"result__a\"")
+        .skip(1)
+        .filter_map(|block| {
+            let snippet = block
+                .split_once("class=\"result__snippet\"")
+                .map(|(_, rest)| inner_text(rest, "</a>"))
+                .unwrap_or_default();
+            duckduckgo_hit(
+                &attribute(block, "href")?,
+                inner_text(block, "</a>"),
+                snippet,
+            )
+        })
+        .collect();
+    (!hits.is_empty()).then_some(hits)
+}
+
+/// Results from DuckDuckGo's lite page, a table with a `result-link` anchor
+/// in one row and a `result-snippet` cell in the next.
+fn parse_duckduckgo_lite(page: &str) -> Option<Vec<Hit>> {
+    let hits: Vec<Hit> = page
+        // The class comes last in these anchors, so each is read from its start.
+        .split("<a ")
+        .skip(1)
+        .filter(|anchor| {
+            anchor
+                .split('>')
+                .next()
+                .is_some_and(|tag| tag.contains("result-link"))
+        })
+        .filter_map(|anchor| {
+            let snippet = anchor
+                .split_once("result-snippet")
+                .map(|(_, rest)| inner_text(rest, "</td>"))
+                .unwrap_or_default();
+            duckduckgo_hit(
+                &attribute(anchor, "href")?,
+                inner_text(anchor, "</a>"),
+                snippet,
+            )
+        })
+        .collect();
+    (!hits.is_empty()).then_some(hits)
+}
+
+/// A result, with its address taken out of DuckDuckGo's redirect, which
+/// carries the target in `uddg`.
+fn duckduckgo_hit(href: &str, title: String, snippet: String) -> Option<Hit> {
+    let url = decode_entities(href);
+    let url = reqwest::Url::parse(&format!("https:{}", url.trim_start_matches("https:")))
+        .ok()
+        .and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "uddg")
+                .map(|(_, v)| v.into_owned())
+        })
+        .unwrap_or(url);
+    (url.starts_with("http") && !title.is_empty()).then_some(Hit {
+        title,
+        url,
+        snippet,
+    })
 }
 
 /// The value of `name="…"` in the tag that `rest` starts inside.
@@ -306,13 +369,13 @@ fn attribute(rest: &str, name: &str) -> Option<String> {
     Some(tag[start..end].to_string())
 }
 
-/// The text between the end of the current tag and its closing `</a>`.
-fn inner_text(rest: &str) -> String {
+/// The text between the end of the current tag and its closing tag.
+fn inner_text(rest: &str, closing: &str) -> String {
     let Some(open) = rest.find('>') else {
         return String::new();
     };
     let body = &rest[open + 1..];
-    let body = &body[..body.find("</a>").unwrap_or(body.len())];
+    let body = &body[..body.find(closing).unwrap_or(body.len())];
     let mut text = String::new();
     let mut in_tag = false;
     for c in body.chars() {
@@ -391,6 +454,62 @@ mod tests {
         );
         assert_eq!(hits[1].url, "https://example.org/direct");
         assert!(parse_duckduckgo("<html>If this persists, please email us.</html>").is_none());
+    }
+
+    #[test]
+    fn duckduckgo_s_lite_page_gives_the_same_results_from_its_table() {
+        // Two results cut from the lite page as DuckDuckGo served it.
+        let page = r#"<tr><td valign="top">1.&nbsp;</td><td>
+            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FPeace_of_Westphalia&amp;rut=e9a4" class='result-link'>Peace of Westphalia - Wikipedia</a></td></tr>
+            <tr><td>&nbsp;&nbsp;&nbsp;</td><td class='result-snippet'>
+              The <b>Peace</b> <b>of</b> <b>Westphalia</b> was a series of treaties that ended the Thirty Years&#x27; War in <b>1648</b>.
+            </td></tr>
+            <tr><td>&nbsp;&nbsp;&nbsp;</td><td><span class='link-text'>en.wikipedia.org/wiki/Peace_of_Westphalia</span></td></tr>
+            <tr><td valign="top">2.&nbsp;</td><td>
+            <a rel="nofollow" href="https://example.org/direct" class='result-link'>Direct link</a></td></tr>
+            <tr><td><a href="/lite/?q=next">Next page</a></td></tr>"#;
+        let hits = parse_duckduckgo_lite(page).unwrap();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(
+            hits[0].url,
+            "https://en.wikipedia.org/wiki/Peace_of_Westphalia"
+        );
+        assert_eq!(hits[0].title, "Peace of Westphalia - Wikipedia");
+        assert_eq!(
+            hits[0].snippet,
+            "The Peace of Westphalia was a series of treaties that ended the Thirty Years' War in 1648."
+        );
+        assert_eq!(hits[1].url, "https://example.org/direct");
+        assert_eq!(hits[1].snippet, "");
+        assert!(parse_duckduckgo_lite(r#"<a href="/x">No results here</a>"#).is_none());
+    }
+
+    /// Calls DuckDuckGo, so it runs only with BOWERBIRD_LIVE=1. Each page is
+    /// read by itself: while one still gives results, a search hides that
+    /// the other has changed.
+    #[tokio::test]
+    async fn each_duckduckgo_page_still_gives_results() {
+        if std::env::var("BOWERBIRD_LIVE").as_deref() != Ok("1") {
+            eprintln!("skipped: set BOWERBIRD_LIVE=1 to call DuckDuckGo");
+            return;
+        }
+        let http = client().unwrap();
+        for (address, parse) in DUCKDUCKGO_PAGES {
+            let url = url(address, &[("q", "Peace of Westphalia 1648")]).unwrap();
+            let page = text(|| http.get(url.clone()), "DuckDuckGo").await.unwrap();
+            // A refusal says nothing about the page's layout, and the search
+            // itself is checked in tests/live.rs.
+            if page.contains(DUCKDUCKGO_REFUSAL) {
+                eprintln!("skipped: {address} refused the search");
+                continue;
+            }
+            let hits = parse(&page).unwrap_or_default();
+            assert!(hits.len() >= 3, "{address} gave {} results", hits.len());
+            assert!(
+                hits.iter().all(|hit| hit.url.starts_with("http")),
+                "{hits:?}"
+            );
+        }
     }
 
     #[test]

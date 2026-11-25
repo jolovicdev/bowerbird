@@ -5,7 +5,7 @@ use std::sync::PoisonError;
 
 use axum::http::StatusCode;
 use bowerbird_core::index::Index;
-use bowerbird_core::ocr::{self, Reader};
+use bowerbird_core::ocr::{self, OcrScript, Reader};
 
 use crate::notebooks::NotebookView;
 use crate::speech::Progress;
@@ -22,15 +22,16 @@ pub(crate) fn start_reading(state: &AppState, view: &NotebookView) {
 }
 
 async fn read_source(state: AppState, slug: String, id: String) {
-    let models = download_models(state.report(&format!("{slug}/sources/{id}")));
-    read_with(state, slug, id, models).await;
+    let script = state.settings().ocr_script;
+    let models = download_models(script, state.report(&format!("{slug}/sources/{id}")));
+    read_with(state, slug, id, script, models).await;
 }
 
-async fn download_models(progress: impl Fn(Progress)) -> Result<(), String> {
+async fn download_models(script: OcrScript, progress: impl Fn(Progress)) -> Result<(), String> {
     let dir = ocr::dir();
-    if !ocr::ready(&dir) {
+    if !ocr::ready(&dir, script) {
         progress(Progress::Downloading { done: 0, total: 0 });
-        ocr::download(&dir, |done, total| {
+        ocr::download(&dir, script, |done, total| {
             progress(Progress::Downloading { done, total })
         })
         .await
@@ -47,6 +48,7 @@ async fn read_with(
     state: AppState,
     slug: String,
     id: String,
+    script: OcrScript,
     models: impl Future<Output = Result<(), String>>,
 ) {
     let key = format!("{slug}/sources/{id}");
@@ -58,7 +60,7 @@ async fn read_with(
         state.report(&key)(Progress::Failed { problem });
         return;
     }
-    let outcome = reading(&state, &slug, &id, &key).await;
+    let outcome = reading(&state, &slug, &id, &key, script).await;
     let _ = blocking({
         let (state, slug) = (state.clone(), slug.clone());
         move || {
@@ -85,7 +87,13 @@ async fn read_with(
     state.finish_job(&key);
 }
 
-async fn reading(state: &AppState, slug: &str, id: &str, key: &str) -> Result<String, String> {
+async fn reading(
+    state: &AppState,
+    slug: &str,
+    id: &str,
+    key: &str,
+    script: OcrScript,
+) -> Result<String, String> {
     let progress = state.report(key);
     let dir = ocr::dir();
     let path = blocking({
@@ -101,7 +109,7 @@ async fn reading(state: &AppState, slug: &str, id: &str, key: &str) -> Result<St
     .await
     .map_err(|e| e.1)?;
     let text = tokio::task::spawn_blocking(move || {
-        let reader = Reader::load(&dir).map_err(|e| e.to_string())?;
+        let reader = Reader::load(&dir, script).map_err(|e| e.to_string())?;
         reader
             .read_pdf(&path, |done, total| {
                 progress(Progress::Reading { done, total })
@@ -129,7 +137,14 @@ mod tests {
         let mut nb = Notebook::open_or_create(&library.join("scans"), "Scans").unwrap();
         let source = nb.add_text("In place of a scan", "Some text.").unwrap();
         let offline = std::future::ready(Err("Couldn't download the models.".to_string()));
-        read_with(state.clone(), "scans".into(), source.id.clone(), offline).await;
+        read_with(
+            state.clone(),
+            "scans".into(),
+            source.id.clone(),
+            OcrScript::Latin,
+            offline,
+        )
+        .await;
         assert!(!nb.ocr_failure_path(&source).exists());
         let job = state.job(&format!("scans/sources/{}", source.id));
         assert!(matches!(job, Some(Progress::Failed { .. })));

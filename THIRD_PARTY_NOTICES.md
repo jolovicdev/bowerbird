@@ -87,8 +87,8 @@ the first time a feature needs it.
   Terms of Use found at ai.google.dev/gemma/terms. Its use is subject to the
   restrictions in section 3.2 of those terms, including the Gemma Prohibited
   Use Policy at ai.google.dev/gemma/prohibited_use_policy.
-- **PP-OCRv5** mobile text detection and Latin recognition, from PaddleOCR,
-  for reading scanned PDFs: Apache License 2.0.
+- **PP-OCRv5** mobile text detection, and recognition for the script chosen
+  in Settings, from PaddleOCR, for reading scanned PDFs: Apache License 2.0.
 - **Kokoro-82M v1.0** by hexgrad, for audio overviews: Apache License 2.0.
 - **Whisper small** by OpenAI, converted for whisper.cpp, for transcribing
   recordings: MIT license, Copyright (c) 2022 OpenAI.

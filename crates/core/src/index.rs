@@ -11,6 +11,10 @@ use crate::doc::{Doc, Figure, Section};
 use crate::notebook::{Notebook, SourceKind};
 use crate::{Error, Result};
 
+mod search;
+
+pub use search::query_terms;
+
 /// Bumped when what extraction stores changes; an index from another version
 /// is dropped and rebuilt from the notebook.
 const VERSION: i64 = 3;
@@ -81,23 +85,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 /// Notebooks smaller than this search every query term: posting lists are
 /// short enough that pruning buys nothing.
 const PRUNE_FROM_CHUNKS: u64 = 20_000;
-/// Share of chunks above which a term counts as too common to search.
-const COMMON_SHARE: f64 = 0.1;
-
-/// Common English words that only add noise to keyword queries.
-const STOPWORDS: &[&str] = &[
-    "a", "about", "above", "after", "again", "all", "also", "am", "an", "and", "any", "are", "as",
-    "at", "be", "because", "been", "before", "being", "between", "both", "but", "by", "can",
-    "could", "did", "do", "does", "doing", "during", "each", "few", "for", "from", "further",
-    "had", "has", "have", "having", "he", "her", "here", "hers", "him", "his", "how", "i", "if",
-    "in", "into", "is", "it", "its", "just", "me", "more", "most", "my", "no", "nor", "not", "now",
-    "of", "off", "on", "once", "only", "or", "other", "our", "out", "over", "own", "same", "she",
-    "should", "so", "some", "such", "than", "that", "the", "their", "them", "then", "there",
-    "these", "they", "this", "those", "through", "to", "too", "under", "until", "up", "very",
-    "was", "we", "were", "what", "when", "where", "which", "while", "who", "whom", "why", "will",
-    "with", "would", "you", "your",
-];
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
     pub chunk_id: i64,
@@ -272,205 +259,6 @@ impl Index {
         Ok(())
     }
 
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Hit>> {
-        let Some(fts) = self.fts_query(query)? else {
-            return Ok(Vec::new());
-        };
-        let mut stmt = self.conn.prepare_cached(
-            // Rank inside FTS5 first so only the top rows get joined.
-            "SELECT c.id, c.source_id, c.ord, top.score
-             FROM (SELECT rowid, bm25(chunks_fts, 1.0, 0.5) AS score
-                   FROM chunks_fts WHERE chunks_fts MATCH ?1
-                   ORDER BY score, rowid LIMIT ?2) AS top
-             JOIN chunks c ON c.id = top.rowid
-             ORDER BY top.score, c.id",
-        )?;
-        let hits = stmt
-            .query_map(params![fts, limit], hit_from_row)?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(hits)
-    }
-
-    /// Like `search`, limited to some sources. Every match is joined before
-    /// ranking, which is slower on large notebooks, so callers use it only
-    /// when some sources are left out.
-    pub fn search_in(&self, query: &str, limit: usize, source_ids: &[&str]) -> Result<Vec<Hit>> {
-        let Some(fts) = self.fts_query(query)? else {
-            return Ok(Vec::new());
-        };
-        let ids = serde_json::to_string(source_ids).map_err(|e| Error::Invalid(e.to_string()))?;
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT c.id, c.source_id, c.ord, bm25(chunks_fts, 1.0, 0.5) AS score
-             FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid
-             WHERE chunks_fts MATCH ?1 AND c.source_id IN (SELECT value FROM json_each(?3))
-             ORDER BY score, c.id LIMIT ?2",
-        )?;
-        let hits = stmt
-            .query_map(params![fts, limit, ids], hit_from_row)?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(hits)
-    }
-
-    /// The FTS5 query for a question's terms, or None when it has no terms.
-    fn fts_query(&self, query: &str) -> Result<Option<String>> {
-        let mut terms = query_terms(query);
-        if terms.is_empty() {
-            return Ok(None);
-        }
-        if self.chunk_total >= PRUNE_FROM_CHUNKS {
-            let max_rows = (self.chunk_total as f64 * COMMON_SHARE) as i64;
-            terms = self.drop_common_terms(terms, max_rows)?;
-        }
-        Ok(Some(
-            terms
-                .iter()
-                .map(|t| format!("\"{t}\""))
-                .collect::<Vec<_>>()
-                .join(" OR "),
-        ))
-    }
-
-    /// Share of a question's search terms that occur anywhere in the index.
-    /// Low when the question is in another language than the sources.
-    pub fn known_share(&self, query: &str) -> Result<f64> {
-        let terms = query_terms(query);
-        if terms.is_empty() || self.chunk_total == 0 {
-            return Ok(1.0);
-        }
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT EXISTS (SELECT 1 FROM chunks_fts WHERE chunks_fts MATCH ?1)")?;
-        let mut known = 0;
-        for term in &terms {
-            if stmt.query_row([format!("\"{term}\"")], |r| r.get::<_, bool>(0))? {
-                known += 1;
-            }
-        }
-        Ok(f64::from(known) / terms.len() as f64)
-    }
-
-    /// Leaves out terms matching `max_rows` chunks or more. Scoring their long
-    /// posting lists dominates query time on large notebooks, while their low
-    /// IDF barely moves the ranking. Keeps every term if all are that common.
-    fn drop_common_terms(&self, terms: Vec<String>, max_rows: i64) -> Result<Vec<String>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT count(*) FROM (SELECT 1 FROM chunks_fts WHERE chunks_fts MATCH ?1 LIMIT ?2)",
-        )?;
-        let mut kept = Vec::new();
-        for term in &terms {
-            let rows: i64 =
-                stmt.query_row(params![format!("\"{term}\""), max_rows], |r| r.get(0))?;
-            if rows < max_rows {
-                kept.push(term.clone());
-            }
-        }
-        Ok(if kept.is_empty() { terms } else { kept })
-    }
-
-    /// Chunks without a vector, in the order they were indexed.
-    pub fn unembedded(&self, limit: usize) -> Result<Vec<ChunkRow>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT id, source_id, ord, start, page_start, page_end, section, text
-             FROM chunks c WHERE NOT EXISTS
-               (SELECT 1 FROM vectors v WHERE v.source_id = c.source_id AND v.ord = c.ord)
-             ORDER BY id LIMIT ?1",
-        )?;
-        let rows = stmt
-            .query_map([limit], row_to_chunk)?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(rows)
-    }
-
-    /// Saves each row's vector, skipping rows whose source was removed
-    /// while they were being embedded.
-    pub fn store_vectors(&mut self, rows: &[ChunkRow], vectors: &[Vec<f32>]) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        {
-            let mut insert = tx.prepare(
-                "INSERT OR REPLACE INTO vectors (source_id, ord, vector)
-                 SELECT ?1, ?2, ?3 WHERE EXISTS
-                   (SELECT 1 FROM chunks WHERE source_id = ?1 AND ord = ?2)",
-            )?;
-            for (row, vector) in rows.iter().zip(vectors) {
-                let bytes: Vec<u8> = vector.iter().flat_map(|x| x.to_le_bytes()).collect();
-                insert.execute(params![row.source_id, row.ord, bytes])?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn vector_count(&self) -> Result<u64> {
-        Ok(self
-            .conn
-            .query_row("SELECT count(*) FROM vectors", [], |r| r.get(0))?)
-    }
-
-    /// The chunks closest in meaning to a normalized query vector, among
-    /// those embedded so far. `source_ids` limits the search to some sources.
-    // Reads every vector per query: 11 ms at 5k chunks, 230 ms at 100k on an
-    // 8-core machine. Past that, keep the vectors in memory or use an
-    // approximate nearest-neighbor index.
-    pub fn dense_search(
-        &self,
-        query: &[f32],
-        limit: usize,
-        source_ids: Option<&[&str]>,
-    ) -> Result<Vec<Hit>> {
-        // Every vector is scored, so the scan reads each one in place and keeps
-        // only the best few; vectors exist only for stored chunks, so chunk
-        // ids are looked up for those few alone.
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT source_id, ord, vector FROM vectors")?;
-        let mut rows = stmt.query([])?;
-        let mut scored: Vec<(f32, String, u32)> = Vec::new();
-        while let Some(row) = rows.next()? {
-            let source_id = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
-            if source_ids.is_some_and(|ids| !ids.contains(&source_id)) {
-                continue;
-            }
-            let score = row
-                .get_ref(2)?
-                .as_blob()
-                .map_err(rusqlite::Error::from)?
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .zip(query)
-                .map(|(b, q)| f32::from_le_bytes(*b) * q)
-                .sum::<f32>();
-            scored.push((score, source_id.to_string(), row.get(1)?));
-        }
-        let best_first = |a: &(f32, String, u32), b: &(f32, String, u32)| {
-            b.0.total_cmp(&a.0)
-                .then_with(|| (&a.1, a.2).cmp(&(&b.1, b.2)))
-        };
-        if scored.len() > limit {
-            scored.select_nth_unstable_by(limit, best_first);
-            scored.truncate(limit);
-        }
-        scored.sort_by(best_first);
-        let mut chunk_id = self
-            .conn
-            .prepare_cached("SELECT id FROM chunks WHERE source_id = ?1 AND ord = ?2")?;
-        let mut hits = Vec::with_capacity(scored.len());
-        for (score, source_id, ord) in scored {
-            if let Some(id) = chunk_id
-                .query_row(params![source_id, ord], |r| r.get(0))
-                .optional()?
-            {
-                hits.push(Hit {
-                    chunk_id: id,
-                    source_id,
-                    ord,
-                    score: f64::from(score),
-                });
-            }
-        }
-        Ok(hits)
-    }
-
     pub fn chunk(&self, source_id: &str, ord: u32) -> Result<Option<ChunkRow>> {
         let mut stmt = self.conn.prepare_cached(
             "SELECT id, source_id, ord, start, page_start, page_end, section, text
@@ -606,27 +394,6 @@ fn row_to_chunk(r: &rusqlite::Row) -> rusqlite::Result<ChunkRow> {
     })
 }
 
-/// The question's distinct non-stopword terms, which get ORed in the FTS5
-/// query. They are alphanumeric only, so quoting them is enough to escape them.
-fn hit_from_row(r: &rusqlite::Row) -> rusqlite::Result<Hit> {
-    Ok(Hit {
-        chunk_id: r.get(0)?,
-        source_id: r.get(1)?,
-        ord: r.get(2)?,
-        score: -r.get::<_, f64>(3)?,
-    })
-}
-
-pub fn query_terms(text: &str) -> Vec<String> {
-    let mut seen = HashSet::new();
-    text.split(|c: char| !c.is_alphanumeric())
-        .map(str::to_lowercase)
-        .filter(|w| !w.is_empty() && !STOPWORDS.contains(&w.as_str()))
-        .filter(|w| w.chars().count() > 1 || w.chars().all(|c| c.is_ascii_digit()))
-        .filter(|w| seen.insert(w.clone()))
-        .collect()
-}
-
 /// Runs `read`, turning a panic into a failure of the one source being read.
 /// The source stays listed, so a panic would fail every later open of its
 /// notebook, whose page is where it can be removed.
@@ -644,26 +411,26 @@ mod tests {
     use super::*;
     use crate::notebook::Notebook;
 
-    #[test]
-    fn a_panic_reading_a_source_is_that_source_s_failure() {
-        assert_eq!(guarded(|| Ok(1)).unwrap(), 1);
-        let failed = guarded(|| -> Result<u32> { panic!("a bug in a reader") });
-        assert!(failed.unwrap_err().to_string().contains("hit a bug"));
-    }
-
-    fn temp_dir(name: &str) -> std::path::PathBuf {
+    pub(super) fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("bowerbird-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
 
-    fn top(index: &Index, q: &str) -> Vec<(String, u32)> {
+    pub(super) fn top(index: &Index, q: &str) -> Vec<(String, u32)> {
         index
             .search(q, 5)
             .unwrap()
             .into_iter()
             .map(|h| (h.source_id, h.ord))
             .collect()
+    }
+
+    #[test]
+    fn a_panic_reading_a_source_is_that_source_s_failure() {
+        assert_eq!(guarded(|| Ok(1)).unwrap(), 1);
+        let failed = guarded(|| -> Result<u32> { panic!("a bug in a reader") });
+        assert!(failed.unwrap_err().to_string().contains("hit a bug"));
     }
 
     #[test]
@@ -753,107 +520,5 @@ mod tests {
         let (index, _) = Index::open_synced(&nb).unwrap();
         let rows = index.chunks_between(&source.id, 0, usize::MAX).unwrap();
         assert_eq!(rows.len(), 2);
-    }
-
-    #[test]
-    fn vectors_rank_by_similarity_and_go_with_their_source() {
-        let dir = temp_dir("vectors");
-        let mut nb = Notebook::open_or_create(&dir, "Birds").unwrap();
-        let satin = nb
-            .add_text("Satin", "# One\nBlue caps.\n# Two\nBlue straws.\n")
-            .unwrap();
-        let vogelkop = nb.add_text("Vogelkop", "Moss mats.").unwrap();
-        let (mut index, _) = Index::open_synced(&nb).unwrap();
-        let rows = index.unembedded(10).unwrap();
-        assert_eq!(rows.len(), 3);
-        let vectors = vec![vec![1.0, 0.0], vec![0.6, 0.8], vec![0.0, 1.0]];
-        index.store_vectors(&rows, &vectors).unwrap();
-        assert!(index.unembedded(10).unwrap().is_empty());
-
-        let near = |q: &[f32], ids: Option<&[&str]>| -> Vec<(String, u32)> {
-            index
-                .dense_search(q, 3, ids)
-                .unwrap()
-                .into_iter()
-                .map(|h| (h.source_id, h.ord))
-                .collect()
-        };
-        assert_eq!(
-            near(&[0.0, 1.0], None),
-            [
-                (vogelkop.id.clone(), 0),
-                (satin.id.clone(), 1),
-                (satin.id.clone(), 0)
-            ]
-        );
-        assert_eq!(
-            near(&[0.0, 1.0], Some(&[satin.id.as_str()])),
-            [(satin.id.clone(), 1), (satin.id.clone(), 0)]
-        );
-        let best_two: Vec<(String, u32)> = index
-            .dense_search(&[0.0, 1.0], 2, None)
-            .unwrap()
-            .into_iter()
-            .map(|h| (h.source_id, h.ord))
-            .collect();
-        assert_eq!(best_two, [(vogelkop.id.clone(), 0), (satin.id.clone(), 1)]);
-
-        index.remove(&satin.id).unwrap();
-        assert_eq!(index.vector_count().unwrap(), 1);
-    }
-
-    #[test]
-    fn query_terms_drop_stopwords_and_punctuation() {
-        assert_eq!(
-            query_terms("What is the 3% rule, again?"),
-            vec!["3", "rule"]
-        );
-        assert!(query_terms("the of and").is_empty());
-    }
-
-    #[test]
-    fn common_terms_are_dropped_unless_nothing_would_remain() {
-        let dir = temp_dir("common-terms");
-        let mut nb = Notebook::open_or_create(&dir, "Birds").unwrap();
-        let sections: String = (0..6)
-            .map(|i| format!("# Part {i}\nThe bower is built of sticks.\n"))
-            .collect();
-        nb.add_text(
-            "Bowers",
-            &format!("{sections}# Satin\nThe satin bower is blue.\n"),
-        )
-        .unwrap();
-        let (index, _) = Index::open_synced(&nb).unwrap();
-        let terms = |ts: &[&str]| ts.iter().map(|t| t.to_string()).collect::<Vec<_>>();
-        assert_eq!(
-            index
-                .drop_common_terms(terms(&["bower", "satin"]), 3)
-                .unwrap(),
-            terms(&["satin"])
-        );
-        assert_eq!(
-            index.drop_common_terms(terms(&["bower"]), 3).unwrap(),
-            terms(&["bower"])
-        );
-    }
-
-    #[test]
-    fn a_question_in_another_language_shares_few_terms_with_the_sources() {
-        let dir = temp_dir("known-share");
-        let mut nb = Notebook::open_or_create(&dir, "History").unwrap();
-        nb.add_text(
-            "Westphalia",
-            "The Peace of Westphalia ended the Thirty Years' War in 1648 and weakened the Emperor.",
-        )
-        .unwrap();
-        let (index, _) = Index::open_synced(&nb).unwrap();
-        let english = index
-            .known_share("What did the Peace of Westphalia end?")
-            .unwrap();
-        let serbian = index
-            .known_share("Koje su bile glavne posledice Vestfalskog mira za carstvo?")
-            .unwrap();
-        assert!(english > 0.9, "{english}");
-        assert!(serbian < 0.2, "{serbian}");
     }
 }

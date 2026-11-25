@@ -6,13 +6,16 @@ use std::time::Instant;
 
 use axum::Json;
 use axum::extract::{Path as UrlPath, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
 use bowerbird_core::ask::{self, Answer, Citation, Exchange, Timings};
 use bowerbird_core::cite::{self, Piece};
+use bowerbird_core::export;
 use bowerbird_core::index::Index;
 use bowerbird_core::notebook::Notebook;
 use bowerbird_core::retrieve::{self, Context};
+use bowerbird_core::settings::Thinking;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +32,7 @@ pub(crate) struct Question {
     #[serde(default)]
     deep: bool,
     model: Option<String>,
+    thinking: Option<Thinking>,
     /// Conversation to continue. Without one, the question starts a new one.
     chat: Option<String>,
 }
@@ -105,7 +109,7 @@ pub(crate) fn usable_sources(nb: &Notebook) -> ApiResult<()> {
 
 /// A conversation's turns, oldest first. A line cut short by a crash
 /// shouldn't hide the rest.
-fn read_chat(nb: &Notebook, id: &str) -> ApiResult<Vec<Answer>> {
+pub(crate) fn read_chat(nb: &Notebook, id: &str) -> ApiResult<Vec<Answer>> {
     match std::fs::read_to_string(nb.item_path("chats", id, "jsonl")?) {
         Ok(raw) => Ok(raw
             .lines()
@@ -124,12 +128,8 @@ async fn run_ask(
     tx: tokio::sync::mpsc::UnboundedSender<SseEvent>,
 ) -> ApiResult<()> {
     let question = body.question.trim().to_string();
-    let model = body
-        .model
-        .unwrap_or_else(|| state.settings().chat_model().to_string());
-    let client = ask::client(state.settings.clone())?;
 
-    let (history, chat, search, foreign, deep) = {
+    let (history, chat, search, foreign, deep, style) = {
         let (state, slug, deep, chat, question) = (
             state.clone(),
             slug.clone(),
@@ -144,6 +144,7 @@ async fn run_ask(
             let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
             let dir = notebook_dir(&state.library, &slug)?;
             let nb = Notebook::open(&dir)?;
+            let style = nb.chat.clone();
             let chat = chat.unwrap_or_else(|| nb.new_item_id("chats", "jsonl"));
             let log = read_chat(&nb, &chat)?;
             let history: Vec<Exchange> = log[log.len().saturating_sub(HISTORY_TURNS)..]
@@ -155,26 +156,37 @@ async fn run_ask(
             let (index, _) = Index::open_synced(&nb)?;
             let foreign = retrieve::foreign_question(&index, &nb, &search)?;
             if !deep {
-                return Ok((history, chat, search, foreign, None));
+                return Ok((history, chat, search, foreign, None, style));
             }
             let ids: Vec<&str> = nb.included().map(|s| s.id.as_str()).collect();
             let outline = retrieve::outline(&index, &nb, &ids, true)?;
-            Ok((history, chat, search, foreign, Some((nb, outline))))
+            Ok((history, chat, search, foreign, Some((nb, outline)), style))
         })
         .await?
     };
+    // A question's own choice wins over the notebook's, which wins over Settings.
+    let (model, thinking) = {
+        let (model, thinking) = state.settings().for_notebook(&style);
+        (
+            body.model.filter(|m| !m.trim().is_empty()).unwrap_or(model),
+            body.thinking.unwrap_or(thinking),
+        )
+    };
+    let client = ask::client_with_thinking(state.settings.clone(), thinking)?;
+    let (helper_client, helper_model) = ask::helper(&state.settings, &client, &model)?;
     // A question in another language than the sources is searched in theirs
     // as well; the answer still follows the question's language.
     let search = match foreign {
         Some(sample) => {
-            let translated = ask::translate_for_search(&client, &model, &search, &sample).await?;
+            let translated =
+                ask::translate_for_search(&helper_client, &helper_model, &search, &sample).await?;
             format!("{translated} {search}")
         }
         None => search,
     };
     let picks = match &deep {
         Some((nb, outline)) => {
-            Some(ask::pick_sections(&client, &model, nb, outline, &search).await?)
+            Some(ask::pick_sections(&helper_client, &helper_model, nb, outline, &search).await?)
         }
         None => None,
     };
@@ -231,7 +243,7 @@ async fn run_ask(
         |event| match event {
             ask::Event::Text(text) => send_event(&tx, "text", text),
             ask::Event::Citation(c) => send_event(&tx, "cite", c),
-            ask::Event::Thinking => send_event(&tx, "thinking", &true),
+            ask::Event::Thinking(text) => send_event(&tx, "thinking", text),
         },
     )
     .await?;
@@ -367,6 +379,37 @@ pub(crate) async fn chat(
     .await
 }
 
+pub(crate) async fn export_chat(
+    State(state): State<AppState>,
+    UrlPath((slug, id)): UrlPath<(String, String)>,
+) -> ApiResult<Response> {
+    blocking(move || {
+        let nb = open_notebook(&state, &slug)?;
+        let turns = read_chat(&nb, &id)?;
+        if turns.is_empty() {
+            return Err(ApiError(
+                StatusCode::NOT_FOUND,
+                "This conversation is empty.".into(),
+            ));
+        }
+        let markdown = export::chat_markdown(&nb, &turns);
+        let filename = format!("{slug}-{id}.md");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/markdown; charset=utf-8"),
+        );
+        if let Ok(disposition) = HeaderValue::from_str(&format!(
+            "attachment; filename=\"{}\"",
+            filename.replace('"', "")
+        )) {
+            headers.insert(header::CONTENT_DISPOSITION, disposition);
+        }
+        Ok((headers, markdown).into_response())
+    })
+    .await
+}
+
 pub(crate) async fn delete_chat(
     State(state): State<AppState>,
     UrlPath((slug, id)): UrlPath<(String, String)>,
@@ -405,6 +448,7 @@ mod tests {
                 question: "When was the peace signed?".to_string(),
                 deep: false,
                 model: Some("heabsy::some-model".to_string()),
+                thinking: None,
                 chat: None,
             },
             Instant::now(),

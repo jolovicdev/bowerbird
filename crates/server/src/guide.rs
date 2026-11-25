@@ -81,9 +81,9 @@ pub(crate) async fn write_guide(
 
 async fn guide_job(state: AppState, slug: String) -> ApiResult<Json<GuideState>> {
     let started = Instant::now();
-    let model = state.settings().chat_model().to_string();
-    let client = ask::client(state.settings.clone())?;
     let (nb, ctx, prompt) = prepare(&state, &slug, "", ask::GUIDE_REQUEST.into()).await?;
+    let (model, thinking) = state.settings().for_notebook(&nb.chat);
+    let client = ask::client_with_thinking(state.settings.clone(), thinking)?;
     let answer = ask::answer(
         &client,
         &model,
